@@ -1,0 +1,662 @@
+{% extends "base.html" %}
+{% block title %}{{ t('wizard_title') }} — {{ APP_NAME }}{% endblock %}
+{% block content %}
+
+<div class="wizard-container">
+    <h1>{{ t('wizard_title') }}</h1>
+    <p class="small-note">{{ t('wizard_subtitle') }}</p>
+
+    {# ---- Progress bar ---- #}
+    <div class="wizard-progress">
+        <div class="wizard-step active" data-step="1">
+            <span class="step-num">1</span>
+            <span class="step-label">{{ t('wizard_step_basic') }}</span>
+        </div>
+        <div class="wizard-step" data-step="2">
+            <span class="step-num">2</span>
+            <span class="step-label">{{ t('wizard_step_source') }}</span>
+        </div>
+        <div class="wizard-step" data-step="3">
+            <span class="step-num">3</span>
+            <span class="step-label">{{ t('wizard_step_transform') }}</span>
+        </div>
+        <div class="wizard-step" data-step="4">
+            <span class="step-num">4</span>
+            <span class="step-label">{{ t('wizard_step_destination') }}</span>
+        </div>
+        <div class="wizard-step" data-step="5">
+            <span class="step-num">5</span>
+            <span class="step-label">{{ t('wizard_step_review') }}</span>
+        </div>
+    </div>
+
+    <form id="wizardForm" method="post" action="{{ url_for('wizard_save') }}" enctype="multipart/form-data">
+
+    {# ================================================================ #}
+    {# STEP 1: Basic Info                                                #}
+    {# ================================================================ #}
+    <div class="wizard-panel card" id="step-1">
+        <h2>{{ t('wizard_step_basic') }}</h2>
+
+        <label>{{ t('wizard_name') }} <span class="required">*</span></label>
+        <input type="text" name="name" id="wiz-name" required
+               placeholder="{{ t('wizard_name_placeholder') }}">
+
+        <label>{{ t('wizard_description') }}</label>
+        <textarea name="description" id="wiz-description" rows="3"
+                  placeholder="{{ t('wizard_description_placeholder') }}"
+                  style="width:100%; padding:0.5rem 0.6rem; border:1px solid var(--border); border-radius:6px; font-size:0.95rem; font-family:inherit;"></textarea>
+
+        <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.8rem;">
+            <input type="checkbox" name="enabled" id="wiz-enabled" checked style="width:auto;">
+            {{ t('integrations_enabled') }}
+        </label>
+    </div>
+
+    {# ================================================================ #}
+    {# STEP 2: Source Configuration                                      #}
+    {# ================================================================ #}
+    <div class="wizard-panel card" id="step-2" style="display:none;">
+        <h2>{{ t('wizard_step_source') }}</h2>
+        <p class="small-note">{{ t('wizard_source_intro') }}</p>
+
+        <label>{{ t('wizard_source_type') }} <span class="required">*</span></label>
+        <div class="source-type-cards">
+            <label class="type-card selected" data-type="file">
+                <input type="radio" name="source_type" value="file" checked>
+                <span class="type-icon">📁</span>
+                <span class="type-name">{{ t('wizard_source_file') }}</span>
+                <span class="type-desc">{{ t('wizard_source_file_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="upload">
+                <input type="radio" name="source_type" value="upload">
+                <span class="type-icon">📤</span>
+                <span class="type-name">{{ t('wizard_source_upload') }}</span>
+                <span class="type-desc">{{ t('wizard_source_upload_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="webhook">
+                <input type="radio" name="source_type" value="webhook">
+                <span class="type-icon">🔗</span>
+                <span class="type-name">{{ t('wizard_source_webhook') }}</span>
+                <span class="type-desc">{{ t('wizard_source_webhook_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="api_poll">
+                <input type="radio" name="source_type" value="api_poll">
+                <span class="type-icon">🔄</span>
+                <span class="type-name">{{ t('wizard_source_api_poll') }}</span>
+                <span class="type-desc">{{ t('wizard_source_api_poll_desc') }}</span>
+            </label>
+        </div>
+
+        {# -- File source config -- #}
+        <div class="source-config" id="source-file">
+            <label>{{ t('wizard_source_input_dir') }} <span class="required">*</span></label>
+            <input type="text" name="source_file_input_dir" placeholder="C:\Motorad\input">
+            <label>{{ t('wizard_source_file_pattern') }}</label>
+            <input type="text" name="source_file_pattern" placeholder="*.json" value="*.*">
+        </div>
+
+        {# -- Upload source config -- #}
+        <div class="source-config" id="source-upload" style="display:none;">
+            <label>{{ t('wizard_source_upload_formats') }}</label>
+            <div style="display:flex; gap:1rem; margin-top:0.3rem;">
+                <label style="display:inline-flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" name="upload_format_json" checked style="width:auto;"> JSON
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" name="upload_format_xml" style="width:auto;"> XML
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" name="upload_format_csv" style="width:auto;"> CSV
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" name="upload_format_excel" style="width:auto;"> Excel
+                </label>
+            </div>
+        </div>
+
+        {# -- Webhook source config -- #}
+        <div class="source-config" id="source-webhook" style="display:none;">
+            <p class="small-note">{{ t('wizard_webhook_auto_note') }}</p>
+            <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.5rem;">
+                <input type="checkbox" name="webhook_require_signature" style="width:auto;">
+                {{ t('webhook_require_signature') }}
+            </label>
+            <label>{{ t('webhook_content_types') }}</label>
+            <input type="text" name="webhook_content_types" value="application/json"
+                   placeholder="application/json, application/xml">
+        </div>
+
+        {# -- API Poll source config -- #}
+        <div class="source-config" id="source-api_poll" style="display:none;">
+            <label>{{ t('api_poll_url') }} <span class="required">*</span></label>
+            <input type="text" name="api_poll_url" placeholder="https://api.example.com/data">
+            <div class="grid-2">
+                <div>
+                    <label>{{ t('api_poll_method') }}</label>
+                    <select name="api_poll_method">
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                    </select>
+                </div>
+                <div>
+                    <label>{{ t('api_poll_interval') }}</label>
+                    <input type="number" name="api_poll_interval" min="30" value="300">
+                </div>
+            </div>
+            <label>{{ t('api_poll_auth_type') }}</label>
+            <select name="api_poll_auth_type" id="api-poll-auth-type">
+                <option value="none">{{ t('api_poll_auth_none') }}</option>
+                <option value="bearer">{{ t('api_poll_auth_bearer') }}</option>
+                <option value="basic">{{ t('api_poll_auth_basic') }}</option>
+                <option value="api_key">{{ t('api_poll_auth_api_key') }}</option>
+            </select>
+            <div id="api-poll-auth-config"></div>
+            <label>{{ t('api_poll_data_path') }}</label>
+            <input type="text" name="api_poll_data_path" placeholder="data.items">
+        </div>
+    </div>
+
+    {# ================================================================ #}
+    {# STEP 3: Transform / Mapping                                       #}
+    {# ================================================================ #}
+    <div class="wizard-panel card" id="step-3" style="display:none;">
+        <h2>{{ t('wizard_step_transform') }}</h2>
+        <p class="small-note">{{ t('wizard_transform_intro') }}</p>
+
+        <label>{{ t('wizard_transform_type') }}</label>
+        <div class="source-type-cards" style="grid-template-columns: repeat(3, 1fr);">
+            <label class="type-card selected" data-type="passthrough">
+                <input type="radio" name="transform_type" value="passthrough" checked>
+                <span class="type-icon">➡️</span>
+                <span class="type-name">{{ t('wizard_transform_passthrough') }}</span>
+                <span class="type-desc">{{ t('wizard_transform_passthrough_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="mapping">
+                <input type="radio" name="transform_type" value="mapping">
+                <span class="type-icon">🔀</span>
+                <span class="type-name">{{ t('wizard_transform_mapping') }}</span>
+                <span class="type-desc">{{ t('wizard_transform_mapping_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="custom">
+                <input type="radio" name="transform_type" value="custom">
+                <span class="type-icon">⚙️</span>
+                <span class="type-name">{{ t('wizard_transform_custom') }}</span>
+                <span class="type-desc">{{ t('wizard_transform_custom_desc') }}</span>
+            </label>
+        </div>
+
+        {# -- Mapping config -- #}
+        <div class="transform-config" id="transform-mapping" style="display:none;">
+            <div class="card" style="background:#f8f9fa; margin-top:1rem;">
+                <h3 style="margin-top:0;">{{ t('wizard_mapping_upload_title') }}</h3>
+                <div class="grid-2">
+                    <div>
+                        <label>{{ t('mapping_upload_source') }}</label>
+                        <input type="file" name="source_sample_file" accept=".json,.xml,.csv,.xls,.xlsx">
+                        <label>{{ t('mapping_or_paste') }}</label>
+                        <textarea name="source_sample_json" rows="4"
+                                  style="width:100%; font-family:monospace; font-size:0.85rem; padding:0.5rem; border:1px solid var(--border); border-radius:6px;"
+                                  placeholder='{"order_id": "12345", ...}'></textarea>
+                    </div>
+                    <div>
+                        <label>{{ t('mapping_upload_target') }}</label>
+                        <input type="file" name="target_sample_file" accept=".json,.xml,.csv,.xls,.xlsx">
+                        <label>{{ t('mapping_or_paste') }}</label>
+                        <textarea name="target_sample_json" rows="4"
+                                  style="width:100%; font-family:monospace; font-size:0.85rem; padding:0.5rem; border:1px solid var(--border); border-radius:6px;"
+                                  placeholder='{"invoice_number": "", ...}'></textarea>
+                    </div>
+                </div>
+                <p class="small-note" style="margin-top:0.8rem;">
+                    {{ t('wizard_mapping_note') }}
+                </p>
+            </div>
+        </div>
+
+        {# -- Custom transform -- #}
+        <div class="transform-config" id="transform-custom" style="display:none;">
+            <label>{{ t('wizard_custom_handler') }}</label>
+            <input type="text" name="custom_handler" placeholder="my_module.transform_function">
+            <p class="small-note">{{ t('wizard_custom_handler_desc') }}</p>
+        </div>
+    </div>
+
+    {# ================================================================ #}
+    {# STEP 4: Destination Configuration                                 #}
+    {# ================================================================ #}
+    <div class="wizard-panel card" id="step-4" style="display:none;">
+        <h2>{{ t('wizard_step_destination') }}</h2>
+        <p class="small-note">{{ t('wizard_dest_intro') }}</p>
+
+        <label>{{ t('wizard_dest_type') }}</label>
+        <div class="source-type-cards" style="grid-template-columns: 1fr 1fr;">
+            <label class="type-card selected" data-type="file">
+                <input type="radio" name="dest_type" value="file" checked>
+                <span class="type-icon">💾</span>
+                <span class="type-name">{{ t('wizard_dest_file') }}</span>
+                <span class="type-desc">{{ t('wizard_dest_file_desc') }}</span>
+            </label>
+            <label class="type-card" data-type="api">
+                <input type="radio" name="dest_type" value="api">
+                <span class="type-icon">🌐</span>
+                <span class="type-name">{{ t('wizard_dest_api') }}</span>
+                <span class="type-desc">{{ t('wizard_dest_api_desc') }}</span>
+            </label>
+        </div>
+
+        {# -- File destination config -- #}
+        <div class="dest-config" id="dest-file">
+            <label>{{ t('transform_output_dir') }} <span class="required">*</span></label>
+            <input type="text" name="dest_file_output_dir" placeholder="C:\Motorad\output">
+            <label>{{ t('transform_output_format') }}</label>
+            <select name="dest_file_format">
+                <option value="json">JSON</option>
+                <option value="xml">XML</option>
+                <option value="csv">CSV</option>
+            </select>
+            <label>{{ t('transform_error_dir') }}</label>
+            <input type="text" name="dest_file_error_dir" placeholder="C:\Motorad\errors">
+            <label>{{ t('transform_archive_dir') }}</label>
+            <input type="text" name="dest_file_archive_dir" placeholder="C:\Motorad\archive">
+        </div>
+
+        {# -- API destination config -- #}
+        <div class="dest-config" id="dest-api" style="display:none;">
+            <label>{{ t('api_dest_url') }} <span class="required">*</span></label>
+            <input type="text" name="dest_api_url" placeholder="https://api.example.com/receive">
+            <div class="grid-2">
+                <div>
+                    <label>{{ t('api_dest_method') }}</label>
+                    <select name="dest_api_method">
+                        <option value="POST">POST</option>
+                        <option value="PUT">PUT</option>
+                        <option value="PATCH">PATCH</option>
+                    </select>
+                    <label>{{ t('api_dest_content_type') }}</label>
+                    <select name="dest_api_content_type">
+                        <option value="application/json">application/json</option>
+                        <option value="application/xml">application/xml</option>
+                        <option value="text/xml">text/xml</option>
+                    </select>
+                </div>
+                <div>
+                    <label>{{ t('api_dest_auth_type') }}</label>
+                    <select name="dest_api_auth_type" id="dest-api-auth-type">
+                        <option value="none">{{ t('api_poll_auth_none') }}</option>
+                        <option value="bearer">{{ t('api_poll_auth_bearer') }}</option>
+                        <option value="basic">{{ t('api_poll_auth_basic') }}</option>
+                        <option value="api_key">{{ t('api_poll_auth_api_key') }}</option>
+                    </select>
+                    <div id="dest-api-auth-config"></div>
+                    <label>{{ t('api_dest_timeout') }}</label>
+                    <input type="number" name="dest_api_timeout" min="5" value="30">
+                    <label>{{ t('api_dest_retries') }}</label>
+                    <input type="number" name="dest_api_retries" min="0" max="10" value="2">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# ================================================================ #}
+    {# STEP 5: Review & Save                                             #}
+    {# ================================================================ #}
+    <div class="wizard-panel card" id="step-5" style="display:none;">
+        <h2>{{ t('wizard_step_review') }}</h2>
+        <p class="small-note">{{ t('wizard_review_intro') }}</p>
+
+        <div id="review-summary" class="review-grid">
+            {# Filled by JS #}
+        </div>
+    </div>
+
+    {# ---- Navigation buttons ---- #}
+    <div class="wizard-nav">
+        <button type="button" id="btn-prev" class="secondary" style="display:none;" onclick="wizardPrev()">
+            {{ t('wizard_prev') }}
+        </button>
+        <div style="flex:1;"></div>
+        <a href="{{ url_for('integrations_view') }}" class="btn secondary" style="text-decoration:none; margin-inline-end:0.5rem;">
+            {{ t('wizard_cancel') }}
+        </a>
+        <button type="button" id="btn-next" onclick="wizardNext()">
+            {{ t('wizard_next') }}
+        </button>
+        <button type="submit" id="btn-save" style="display:none;">
+            {{ t('wizard_save') }}
+        </button>
+    </div>
+
+    </form>
+</div>
+
+<style>
+/* Wizard layout */
+.wizard-container { max-width: 800px; margin: 0 auto; }
+
+.wizard-progress {
+    display: flex;
+    justify-content: space-between;
+    margin: 1.5rem 0;
+    position: relative;
+}
+.wizard-progress::before {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: 10%;
+    right: 10%;
+    height: 2px;
+    background: var(--border);
+    z-index: 0;
+}
+.wizard-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 1;
+    cursor: default;
+}
+.step-num {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--border);
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.95rem;
+    transition: all 0.2s;
+}
+.wizard-step.active .step-num,
+.wizard-step.done .step-num {
+    background: var(--motorad-red);
+    color: #fff;
+}
+.wizard-step.done .step-num {
+    background: var(--success);
+}
+.step-label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 0.3rem;
+    text-align: center;
+    max-width: 90px;
+}
+.wizard-step.active .step-label { color: var(--text); font-weight: 600; }
+
+/* Type selection cards */
+.source-type-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.8rem;
+    margin-top: 0.5rem;
+}
+.type-card {
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.15s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+}
+.type-card:hover { border-color: var(--motorad-red); background: #fef2f2; }
+.type-card.selected { border-color: var(--motorad-red); background: #fef2f2; }
+.type-card input[type=radio] { display: none; }
+.type-icon { font-size: 1.5rem; }
+.type-name { font-weight: 600; font-size: 0.9rem; }
+.type-desc { font-size: 0.75rem; color: var(--muted); }
+
+/* Nav buttons */
+.wizard-nav {
+    display: flex;
+    align-items: center;
+    margin-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+.wizard-nav .secondary { background: #6b7280; }
+
+/* Review grid */
+.review-grid { line-height: 1.8; }
+.review-section { margin-bottom: 1rem; }
+.review-section h3 { margin: 0 0 0.3rem; font-size: 1rem; color: var(--motorad-red-dark); }
+.review-row {
+    display: flex;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    padding: 0.15rem 0;
+}
+.review-label { color: var(--muted); min-width: 140px; }
+.review-value { font-weight: 500; }
+
+.required { color: var(--error); }
+
+/* Auth config fields that appear dynamically */
+.auth-field { margin-top: 0.5rem; }
+
+/* Responsive */
+@media (max-width: 700px) {
+    .source-type-cards { grid-template-columns: 1fr 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .review-row { flex-direction: column; gap: 0; }
+}
+</style>
+
+<script>
+(function() {
+    const TOTAL_STEPS = 5;
+    let currentStep = 1;
+
+    // ---- Type-card selection ----
+    document.querySelectorAll('.type-card').forEach(card => {
+        card.addEventListener('click', function() {
+            const group = this.closest('.source-type-cards');
+            group.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
+            this.classList.add('selected');
+            this.querySelector('input[type=radio]').checked = true;
+
+            // Show/hide config panels
+            const parentPanel = this.closest('.wizard-panel');
+            if (parentPanel.id === 'step-2') {
+                toggleSourceConfig(this.dataset.type);
+            } else if (parentPanel.id === 'step-3') {
+                toggleTransformConfig(this.dataset.type);
+            } else if (parentPanel.id === 'step-4') {
+                toggleDestConfig(this.dataset.type);
+            }
+        });
+    });
+
+    function toggleSourceConfig(type) {
+        document.querySelectorAll('.source-config').forEach(el => el.style.display = 'none');
+        const target = document.getElementById('source-' + type);
+        if (target) target.style.display = '';
+    }
+
+    function toggleTransformConfig(type) {
+        document.querySelectorAll('.transform-config').forEach(el => el.style.display = 'none');
+        const target = document.getElementById('transform-' + type);
+        if (target) target.style.display = '';
+    }
+
+    function toggleDestConfig(type) {
+        document.querySelectorAll('.dest-config').forEach(el => el.style.display = 'none');
+        const target = document.getElementById('dest-' + type);
+        if (target) target.style.display = '';
+    }
+
+    // ---- Auth type dynamic fields ----
+    function buildAuthFields(selectId, containerId) {
+        const sel = document.getElementById(selectId);
+        if (!sel) return;
+        sel.addEventListener('change', function() {
+            const container = document.getElementById(containerId);
+            const prefix = containerId.replace('-config', '').replace('-', '_');
+            container.innerHTML = '';
+            switch (this.value) {
+                case 'bearer':
+                    container.innerHTML = '<div class="auth-field"><label>Token</label>' +
+                        '<input type="text" name="' + prefix + '_bearer_token" placeholder="Bearer token"></div>';
+                    break;
+                case 'basic':
+                    container.innerHTML = '<div class="auth-field"><label>Username</label>' +
+                        '<input type="text" name="' + prefix + '_basic_user"></div>' +
+                        '<div class="auth-field"><label>Password</label>' +
+                        '<input type="password" name="' + prefix + '_basic_pass"></div>';
+                    break;
+                case 'api_key':
+                    container.innerHTML = '<div class="auth-field"><label>Header Name</label>' +
+                        '<input type="text" name="' + prefix + '_apikey_header" placeholder="X-API-Key"></div>' +
+                        '<div class="auth-field"><label>Key Value</label>' +
+                        '<input type="text" name="' + prefix + '_apikey_value"></div>';
+                    break;
+            }
+        });
+    }
+    buildAuthFields('api-poll-auth-type', 'api-poll-auth-config');
+    buildAuthFields('dest-api-auth-type', 'dest-api-auth-config');
+
+    // ---- Validation per step ----
+    function validateStep(step) {
+        if (step === 1) {
+            const name = document.getElementById('wiz-name').value.trim();
+            if (!name) { alert("{{ t('wizard_err_name_required') }}"); return false; }
+        }
+        if (step === 2) {
+            const srcType = document.querySelector('input[name=source_type]:checked').value;
+            if (srcType === 'file') {
+                const dir = document.querySelector('input[name=source_file_input_dir]').value.trim();
+                if (!dir) { alert("{{ t('wizard_err_source_dir') }}"); return false; }
+            }
+            if (srcType === 'api_poll') {
+                const url = document.querySelector('input[name=api_poll_url]').value.trim();
+                if (!url) { alert("{{ t('wizard_err_api_url') }}"); return false; }
+            }
+        }
+        if (step === 4) {
+            const destType = document.querySelector('input[name=dest_type]:checked').value;
+            if (destType === 'file') {
+                const dir = document.querySelector('input[name=dest_file_output_dir]').value.trim();
+                if (!dir) { alert("{{ t('wizard_err_dest_dir') }}"); return false; }
+            }
+            if (destType === 'api') {
+                const url = document.querySelector('input[name=dest_api_url]').value.trim();
+                if (!url) { alert("{{ t('wizard_err_dest_url') }}"); return false; }
+            }
+        }
+        return true;
+    }
+
+    // ---- Step navigation ----
+    function goToStep(step) {
+        // Hide all panels
+        for (let i = 1; i <= TOTAL_STEPS; i++) {
+            document.getElementById('step-' + i).style.display = 'none';
+        }
+        document.getElementById('step-' + step).style.display = '';
+
+        // Update progress indicators
+        document.querySelectorAll('.wizard-step').forEach(el => {
+            const s = parseInt(el.dataset.step);
+            el.classList.remove('active', 'done');
+            if (s === step) el.classList.add('active');
+            else if (s < step) el.classList.add('done');
+        });
+
+        // Button visibility
+        document.getElementById('btn-prev').style.display = (step > 1) ? '' : 'none';
+        document.getElementById('btn-next').style.display = (step < TOTAL_STEPS) ? '' : 'none';
+        document.getElementById('btn-save').style.display = (step === TOTAL_STEPS) ? '' : 'none';
+
+        currentStep = step;
+
+        // Build review on step 5
+        if (step === TOTAL_STEPS) buildReview();
+    }
+
+    window.wizardNext = function() {
+        if (!validateStep(currentStep)) return;
+        if (currentStep < TOTAL_STEPS) goToStep(currentStep + 1);
+    };
+
+    window.wizardPrev = function() {
+        if (currentStep > 1) goToStep(currentStep - 1);
+    };
+
+    // ---- Build review summary ----
+    function buildReview() {
+        const name = document.getElementById('wiz-name').value.trim();
+        const desc = document.getElementById('wiz-description').value.trim();
+        const enabled = document.getElementById('wiz-enabled').checked;
+        const srcType = document.querySelector('input[name=source_type]:checked').value;
+        const trnType = document.querySelector('input[name=transform_type]:checked').value;
+        const destType = document.querySelector('input[name=dest_type]:checked').value;
+
+        let html = '';
+
+        // Basic
+        html += '<div class="review-section">';
+        html += '<h3>{{ t("wizard_step_basic") }}</h3>';
+        html += reviewRow("{{ t('wizard_name') }}", name);
+        if (desc) html += reviewRow("{{ t('wizard_description') }}", desc);
+        html += reviewRow("{{ t('integrations_enabled') }}", enabled ? '✓' : '✗');
+        html += '</div>';
+
+        // Source
+        html += '<div class="review-section">';
+        html += '<h3>{{ t("wizard_step_source") }}</h3>';
+        html += reviewRow("{{ t('wizard_source_type') }}", srcType);
+        if (srcType === 'file') {
+            html += reviewRow("{{ t('wizard_source_input_dir') }}",
+                document.querySelector('input[name=source_file_input_dir]').value);
+        } else if (srcType === 'api_poll') {
+            html += reviewRow("{{ t('api_poll_url') }}",
+                document.querySelector('input[name=api_poll_url]').value);
+            html += reviewRow("{{ t('api_poll_interval') }}",
+                document.querySelector('input[name=api_poll_interval]').value + 's');
+        }
+        html += '</div>';
+
+        // Transform
+        html += '<div class="review-section">';
+        html += '<h3>{{ t("wizard_step_transform") }}</h3>';
+        html += reviewRow("{{ t('wizard_transform_type') }}", trnType);
+        html += '</div>';
+
+        // Destination
+        html += '<div class="review-section">';
+        html += '<h3>{{ t("wizard_step_destination") }}</h3>';
+        html += reviewRow("{{ t('wizard_dest_type') }}", destType);
+        if (destType === 'file') {
+            html += reviewRow("{{ t('transform_output_dir') }}",
+                document.querySelector('input[name=dest_file_output_dir]').value);
+            html += reviewRow("{{ t('transform_output_format') }}",
+                document.querySelector('select[name=dest_file_format]').value.toUpperCase());
+        } else if (destType === 'api') {
+            html += reviewRow("{{ t('api_dest_url') }}",
+                document.querySelector('input[name=dest_api_url]').value);
+            html += reviewRow("{{ t('api_dest_method') }}",
+                document.querySelector('select[name=dest_api_method]').value);
+        }
+        html += '</div>';
+
+        document.getElementById('review-summary').innerHTML = html;
+    }
+
+    function reviewRow(label, value) {
+        return '<div class="review-row"><span class="review-label">' + label +
+               ':</span><span class="review-value">' + (value || '—') + '</span></div>';
+    }
+
+    // Init
+    goToStep(1);
+})();
+</script>
+
+{% endblock %}

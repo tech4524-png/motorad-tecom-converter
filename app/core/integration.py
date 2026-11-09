@@ -118,7 +118,7 @@ def validate_integration_config(config: dict) -> List[str]:
         tx_type = tx.get("type", "mapping")
         if tx_type not in TRANSFORM_TYPES:
             errors.append(f"Invalid transform type: {tx_type}")
-        if tx_type == "mapping" and not tx.get("field_mappings"):
+        if tx_type == "mapping" and "field_mappings" not in tx:
             errors.append("Transform type 'mapping' requires 'field_mappings'")
 
     return errors

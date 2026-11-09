@@ -1,7 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>{{ t('integrations_title') }}</h1>
-<p class="small-note">{{ t('integrations_intro') }}</p>
+<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.5rem;">
+    <div>
+        <h1 style="margin-bottom:0.2rem;">{{ t('integrations_title') }}</h1>
+        <p class="small-note" style="margin:0;">{{ t('integrations_intro') }}</p>
+    </div>
+    <a href="{{ url_for('wizard_new') }}" class="btn"
+       style="display:inline-flex; align-items:center; gap:0.4rem; font-size:0.95rem;">
+        <span style="font-size:1.2rem; line-height:1;">+</span> {{ t('wizard_new_integration') }}
+    </a>
+</div>
 
 {# ---- Tab navigation ---- #}
 <div class="tab-bar" style="display:flex; gap:0; margin-bottom:1.5rem; border-bottom:2px solid var(--border);">

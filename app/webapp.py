@@ -483,6 +483,164 @@ def create_app(watcher_manager=None, api_poll_manager=None):
         )
 
     # ------------------------------------------------------------------ #
+    # Integration Wizard (Phase 4)
+    # ------------------------------------------------------------------ #
+
+    @app.route("/integrations/new")
+    @login_required
+    def wizard_new():
+        """Show the step-by-step integration creation wizard."""
+        return render_template("integration_wizard.html")
+
+    @app.route("/integrations/wizard/save", methods=["POST"])
+    @login_required
+    def wizard_save():
+        """Process the wizard form and create a new integration."""
+        cfg = get_config()
+        t = _translator()
+
+        name = request.form.get("name", "").strip()
+        if not name:
+            flash(t("wizard_err_name_required"), "error")
+            return redirect(url_for("wizard_new"))
+
+        description = request.form.get("description", "").strip()
+        enabled = request.form.get("enabled") == "on"
+        source_type = request.form.get("source_type", "file")
+        transform_type = request.form.get("transform_type", "passthrough")
+        dest_type = request.form.get("dest_type", "file")
+
+        # ---- Build source config ----
+        source_config = {}
+        if source_type == "file":
+            source_config = {
+                "input_dir": request.form.get("source_file_input_dir", "").strip(),
+                "file_pattern": request.form.get("source_file_pattern", "*.*").strip(),
+            }
+        elif source_type == "upload":
+            formats = []
+            for fmt in ("json", "xml", "csv", "excel"):
+                if request.form.get(f"upload_format_{fmt}"):
+                    formats.append(fmt)
+            source_config = {"allowed_formats": formats or ["json"]}
+        elif source_type == "webhook":
+            from .core.webhook import generate_webhook_path, generate_webhook_secret
+            require_sig = request.form.get("webhook_require_signature") == "on"
+            ct_raw = request.form.get("webhook_content_types", "application/json")
+            content_types = [c.strip() for c in ct_raw.split(",") if c.strip()]
+            source_config = {
+                "webhook_path": generate_webhook_path(),
+                "webhook_secret": generate_webhook_secret(),
+                "require_signature": require_sig,
+                "content_types": content_types or ["application/json"],
+            }
+        elif source_type == "api_poll":
+            from .core.api_poll import make_api_poll_source_config
+            auth_type = request.form.get("api_poll_auth_type", "none")
+            auth_config = {}
+            if auth_type == "bearer":
+                auth_config = {"token": request.form.get("api_poll_bearer_token", "")}
+            elif auth_type == "basic":
+                auth_config = {
+                    "username": request.form.get("api_poll_basic_user", ""),
+                    "password": request.form.get("api_poll_basic_pass", ""),
+                }
+            elif auth_type == "api_key":
+                auth_config = {
+                    "header": request.form.get("api_poll_apikey_header", "X-API-Key"),
+                    "value": request.form.get("api_poll_apikey_value", ""),
+                }
+
+            source_config = make_api_poll_source_config(
+                url=request.form.get("api_poll_url", "").strip(),
+                method=request.form.get("api_poll_method", "GET"),
+                poll_interval_seconds=int(request.form.get("api_poll_interval", "300")),
+                data_path=request.form.get("api_poll_data_path", ""),
+            )
+            if auth_type != "none":
+                source_config["auth"] = {"type": auth_type, "config": auth_config}
+
+        # ---- Build transform config ----
+        transform_config = {"type": transform_type}
+        if transform_type == "mapping":
+            transform_config["field_mappings"] = []
+            transform_config["lookup_tables"] = {}
+            transform_config["constants"] = {}
+            transform_config["defaults"] = {}
+        elif transform_type == "custom":
+            transform_config["handler"] = request.form.get("custom_handler", "").strip()
+
+        # ---- Build destination config ----
+        dest_config = {}
+        if dest_type == "file":
+            dest_config = {
+                "output_dir": request.form.get("dest_file_output_dir", "").strip(),
+                "format": request.form.get("dest_file_format", "json"),
+            }
+        elif dest_type == "api":
+            auth_type = request.form.get("dest_api_auth_type", "none")
+            auth_cfg = {}
+            if auth_type == "bearer":
+                auth_cfg = {"token": request.form.get("dest_api_bearer_token", "")}
+            elif auth_type == "basic":
+                auth_cfg = {
+                    "username": request.form.get("dest_api_basic_user", ""),
+                    "password": request.form.get("dest_api_basic_pass", ""),
+                }
+            elif auth_type == "api_key":
+                auth_cfg = {
+                    "header": request.form.get("dest_api_apikey_header", "X-API-Key"),
+                    "value": request.form.get("dest_api_apikey_value", ""),
+                }
+            dest_config = {
+                "url": request.form.get("dest_api_url", "").strip(),
+                "method": request.form.get("dest_api_method", "POST"),
+                "content_type": request.form.get("dest_api_content_type", "application/json"),
+                "timeout_seconds": int(request.form.get("dest_api_timeout", "30")),
+                "retry_count": int(request.form.get("dest_api_retries", "2")),
+                "retry_delay_seconds": 5,
+            }
+            if auth_type != "none":
+                dest_config["auth"] = {"type": auth_type, "config": auth_cfg}
+
+        # ---- Error handling ----
+        error_handling = {}
+        error_dir = request.form.get("dest_file_error_dir", "").strip()
+        archive_dir = request.form.get("dest_file_archive_dir", "").strip()
+        if error_dir:
+            error_handling["error_dir"] = error_dir
+        if archive_dir:
+            error_handling["archive_dir"] = archive_dir
+
+        # ---- Create the integration ----
+        from .core.integration import make_integration_config
+        integ = make_integration_config(
+            name=name,
+            source_type=source_type,
+            source_config=source_config,
+            transform_config=transform_config,
+            destination_type=dest_type,
+            destination_config=dest_config,
+            enabled=enabled,
+            error_handling=error_handling if error_handling else None,
+        )
+        if description:
+            integ["description"] = description
+
+        ok, err = config_module.add_integration(cfg, integ)
+        if not ok:
+            flash(err or "Failed to create integration", "error")
+            return redirect(url_for("wizard_new"))
+
+        flash(t("wizard_saved"), "success")
+
+        # If mapping transform, redirect to the mapping editor
+        if transform_type == "mapping":
+            return redirect(url_for("mapping_editor", integration_id=integ["id"]))
+
+        return redirect(url_for("integrations_view"))
+
+    # ------------------------------------------------------------------ #
     # Mapping Editor API (Phase 3)
     # ------------------------------------------------------------------ #
 
