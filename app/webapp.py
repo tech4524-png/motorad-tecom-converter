@@ -125,6 +125,16 @@ def create_app(watcher_manager=None, api_poll_manager=None):
                 if field in form:
                     banking[field] = form.get(field, "").strip()
 
+            # AI settings (Phase 3)
+            if "ai_provider" in form:
+                ai = cfg.setdefault("ai", {})
+                ai["provider"] = form.get("ai_provider", "none").strip()
+                ai["model"] = form.get("ai_model", "").strip()
+                # Only update API key if a new value was submitted (not the placeholder)
+                new_key = form.get("ai_api_key", "").strip()
+                if new_key and new_key != "••••••••":
+                    ai["api_key"] = new_key
+
             config_module.save_config(cfg)
             flash(_translator()("settings_saved"), "success")
             return redirect(url_for("settings_view"))
@@ -471,5 +481,140 @@ def create_app(watcher_manager=None, api_poll_manager=None):
             current_version=cfg.get("app_version", "1.0.0"),
             backups=updates_module.list_backups(),
         )
+
+    # ------------------------------------------------------------------ #
+    # Mapping Editor API (Phase 3)
+    # ------------------------------------------------------------------ #
+
+    @app.route("/mapping/analyze", methods=["POST"])
+    @login_required
+    def mapping_analyze():
+        """Extract schema from an uploaded sample file or pasted JSON."""
+        import json as json_mod
+        from .core.schema_parser import extract_schema_from_file, extract_schema_from_data, extract_schema_from_raw
+
+        side = request.form.get("side", "source")  # "source" or "target"
+
+        # Option 1: file upload
+        uploaded = request.files.get("sample_file")
+        if uploaded and uploaded.filename:
+            import tempfile, os
+            suffix = Path(uploaded.filename).suffix
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            uploaded.save(tmp.name)
+            tmp.close()
+            try:
+                fields, err = extract_schema_from_file(tmp.name)
+            finally:
+                os.unlink(tmp.name)
+            if err:
+                return json_mod.dumps({"ok": False, "error": err}), 400, {"Content-Type": "application/json"}
+            return json_mod.dumps({"ok": True, "side": side, "fields": fields}), 200, {"Content-Type": "application/json"}
+
+        # Option 2: pasted text
+        pasted = request.form.get("pasted_data", "").strip()
+        if pasted:
+            content_type = request.form.get("content_type", "application/json")
+            fields, err = extract_schema_from_raw(pasted, content_type)
+            if err:
+                return json_mod.dumps({"ok": False, "error": err}), 400, {"Content-Type": "application/json"}
+            return json_mod.dumps({"ok": True, "side": side, "fields": fields}), 200, {"Content-Type": "application/json"}
+
+        return json_mod.dumps({"ok": False, "error": "No file or data provided"}), 400, {"Content-Type": "application/json"}
+
+    @app.route("/mapping/ai-suggest", methods=["POST"])
+    @login_required
+    def mapping_ai_suggest():
+        """Call AI to suggest field mappings between source and target schemas."""
+        import json as json_mod
+        from .core.ai_mapper import suggest_mappings
+
+        cfg = get_config()
+        data = request.get_json(silent=True) or {}
+        source_schema = data.get("source_schema", [])
+        target_schema = data.get("target_schema", [])
+        context = data.get("context", "")
+
+        if not source_schema or not target_schema:
+            return json_mod.dumps({"ok": False, "error": "Source and target schemas are required"}), 400, {"Content-Type": "application/json"}
+
+        mappings, err = suggest_mappings(source_schema, target_schema, cfg, context)
+        if err:
+            return json_mod.dumps({"ok": False, "error": err}), 400, {"Content-Type": "application/json"}
+
+        return json_mod.dumps({"ok": True, "mappings": mappings}), 200, {"Content-Type": "application/json"}
+
+    @app.route("/mapping/save", methods=["POST"])
+    @login_required
+    def mapping_save():
+        """Save field mappings to an integration config."""
+        import json as json_mod
+        from .core.ai_mapper import mappings_to_transform_config
+
+        cfg = get_config()
+        data = request.get_json(silent=True) or {}
+        integration_id = data.get("integration_id", "")
+        mappings = data.get("mappings", [])
+
+        if not integration_id:
+            return json_mod.dumps({"ok": False, "error": "integration_id is required"}), 400, {"Content-Type": "application/json"}
+
+        integ = config_module.get_integration_by_id(cfg, integration_id)
+        if not integ:
+            return json_mod.dumps({"ok": False, "error": f"Integration {integration_id} not found"}), 404, {"Content-Type": "application/json"}
+
+        # Build transform config from mappings
+        transform = mappings_to_transform_config(mappings)
+
+        # Preserve existing lookup_tables and constants if present
+        old_transform = integ.get("transform", {})
+        if old_transform.get("lookup_tables"):
+            transform["lookup_tables"] = old_transform["lookup_tables"]
+        if old_transform.get("constants"):
+            transform["constants"] = old_transform["constants"]
+        if old_transform.get("defaults"):
+            transform["defaults"] = old_transform["defaults"]
+
+        ok, err = config_module.update_integration(cfg, integration_id, {"transform": transform})
+        if not ok:
+            return json_mod.dumps({"ok": False, "error": err}), 400, {"Content-Type": "application/json"}
+
+        return json_mod.dumps({"ok": True}), 200, {"Content-Type": "application/json"}
+
+    @app.route("/mapping/editor/<integration_id>")
+    @login_required
+    def mapping_editor(integration_id):
+        """Visual mapping editor page for a specific integration."""
+        cfg = get_config()
+        integ = config_module.get_integration_by_id(cfg, integration_id)
+        if not integ:
+            flash("Integration not found", "error")
+            return redirect(url_for("integrations_view"))
+
+        from .core.ai_mapper import get_ai_config
+        ai_cfg = get_ai_config(cfg)
+
+        return render_template(
+            "mapping_editor.html",
+            integration=integ,
+            ai_enabled=ai_cfg["enabled"],
+        )
+
+    @app.route("/mapping/test-ai", methods=["POST"])
+    @login_required
+    def mapping_test_ai():
+        """Test AI connection with a minimal request."""
+        import json as json_mod
+        from .core.ai_mapper import suggest_mappings
+
+        cfg = get_config()
+        test_source = [{"path": "test_field", "type": "string", "sample": "hello"}]
+        test_target = [{"path": "output_field", "type": "string", "sample": ""}]
+
+        mappings, err = suggest_mappings(test_source, test_target, cfg, "Connection test")
+        if err:
+            return json_mod.dumps({"ok": False, "error": err}), 400, {"Content-Type": "application/json"}
+
+        return json_mod.dumps({"ok": True, "message": "AI connection successful"}), 200, {"Content-Type": "application/json"}
 
     return app

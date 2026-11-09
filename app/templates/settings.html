@@ -71,6 +71,34 @@
     </div>
     <button type="submit">{{ t('settings_save') }}</button>
 </div>
+
+<div class="card">
+    <h2>{{ t('settings_ai_h2') }}</h2>
+    <p style="color:#666; margin-bottom:12px;">{{ t('settings_ai_description') }}</p>
+    <div class="grid-2">
+        <div>
+            <label>{{ t('settings_ai_provider') }}</label>
+            <select name="ai_provider" id="ai_provider" onchange="toggleAiFields()">
+                <option value="none" {% if cfg.ai.provider == 'none' %}selected{% endif %}>{{ t('settings_ai_none') }}</option>
+                <option value="openai" {% if cfg.ai.provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                <option value="anthropic" {% if cfg.ai.provider == 'anthropic' %}selected{% endif %}>Anthropic (Claude)</option>
+            </select>
+        </div>
+        <div id="ai_fields" style="{% if cfg.ai.provider == 'none' %}display:none{% endif %}">
+            <label>{{ t('settings_ai_api_key') }}</label>
+            <input type="password" name="ai_api_key" value="{% if cfg.ai.api_key %}••••••••{% endif %}" placeholder="{{ t('settings_ai_key_placeholder') }}">
+            <label>{{ t('settings_ai_model') }}</label>
+            <input type="text" name="ai_model" value="{{ cfg.ai.model }}" placeholder="gpt-4o / claude-sonnet-4-20250514">
+        </div>
+    </div>
+    <script>
+    function toggleAiFields() {
+        var provider = document.getElementById('ai_provider').value;
+        document.getElementById('ai_fields').style.display = provider === 'none' ? 'none' : '';
+    }
+    </script>
+    <button type="submit">{{ t('settings_save') }}</button>
+</div>
 </form>
 
 <div class="card">

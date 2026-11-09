@@ -81,7 +81,13 @@ DEFAULT_CONFIG = {
     # ordrsp) are NOT stored here — they are generated on-the-fly from the
     # profiles list above.
     "integrations": [],
-    "app_version": "1.2.0",
+    # AI configuration (Phase 3) — provider, key, model for field mapping
+    "ai": {
+        "provider": "none",   # "openai", "anthropic", or "none"
+        "api_key": "",
+        "model": "",
+    },
+    "app_version": "1.3.0",
     "language": "he",
 }
 

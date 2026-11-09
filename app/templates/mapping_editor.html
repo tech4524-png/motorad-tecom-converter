@@ -1,0 +1,326 @@
+{% extends "base.html" %}
+{% block title %}{{ t('mapping_editor_title') }} — {{ integration.name }}{% endblock %}
+{% block content %}
+<style>
+.mapping-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px; }
+.mapping-header h1 { margin:0; font-size:1.4em; }
+.mapping-header .actions { display:flex; gap:8px; }
+
+.schema-panels { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px; }
+.schema-panel { border:1px solid #ddd; border-radius:8px; padding:16px; background:#fafafa; }
+.schema-panel h3 { margin:0 0 12px; font-size:1.1em; }
+.schema-panel .upload-area { margin-bottom:12px; }
+.schema-panel .upload-area input[type="file"] { margin-bottom:8px; }
+.schema-panel textarea { width:100%; min-height:80px; font-family:monospace; font-size:12px; resize:vertical; }
+.schema-panel .field-list { max-height:300px; overflow-y:auto; border:1px solid #e0e0e0; border-radius:4px; background:#fff; }
+.schema-panel .field-item { padding:6px 10px; border-bottom:1px solid #f0f0f0; font-size:13px; display:flex; justify-content:space-between; }
+.schema-panel .field-item:last-child { border-bottom:none; }
+.schema-panel .field-item .path { font-family:monospace; font-weight:600; }
+.schema-panel .field-item .meta { color:#888; font-size:12px; }
+
+.mappings-card { border:1px solid #ddd; border-radius:8px; padding:16px; background:#fff; margin-bottom:16px; }
+.mappings-card h3 { margin:0 0 12px; font-size:1.1em; }
+.mapping-row { display:grid; grid-template-columns:1fr 30px 1fr 140px 60px; gap:8px; align-items:center; padding:8px; border:1px solid #e8e8e8; border-radius:6px; margin-bottom:8px; background:#fafafa; }
+.mapping-row .arrow { text-align:center; font-size:18px; color:#888; }
+.mapping-row select, .mapping-row input { padding:6px 8px; font-size:13px; border:1px solid #ccc; border-radius:4px; }
+.mapping-row .confidence-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; text-align:center; }
+.confidence-high { background:#d4edda; color:#155724; }
+.confidence-medium { background:#fff3cd; color:#856404; }
+.confidence-low { background:#f8d7da; color:#721c24; }
+.mapping-row .btn-remove { background:#dc3545; color:#fff; border:none; padding:6px 10px; border-radius:4px; cursor:pointer; font-size:12px; }
+.mapping-row .btn-remove:hover { background:#c82333; }
+
+.btn { display:inline-block; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500; }
+.btn-primary { background:#0d6efd; color:#fff; }
+.btn-primary:hover { background:#0b5ed7; }
+.btn-success { background:#198754; color:#fff; }
+.btn-success:hover { background:#157347; }
+.btn-secondary { background:#6c757d; color:#fff; }
+.btn-secondary:hover { background:#5c636a; }
+.btn-ai { background:linear-gradient(135deg,#667eea,#764ba2); color:#fff; }
+.btn-ai:hover { background:linear-gradient(135deg,#5a6fd6,#6a4192); }
+.btn-ai:disabled { opacity:0.6; cursor:not-allowed; }
+
+.spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; margin-inline-end:6px; vertical-align:middle; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.reasoning-tooltip { cursor:help; color:#6c757d; font-size:12px; }
+.empty-state { text-align:center; padding:40px; color:#888; }
+.alert { padding:10px 16px; border-radius:6px; margin-bottom:12px; }
+.alert-info { background:#cfe2ff; color:#084298; }
+.alert-error { background:#f8d7da; color:#842029; }
+</style>
+
+<div class="mapping-header">
+    <h1>{{ t('mapping_editor_title') }}: {{ integration.name }}</h1>
+    <div class="actions">
+        <a href="{{ url_for('integrations_view') }}" class="btn btn-secondary">← {{ t('nav_integrations') }}</a>
+    </div>
+</div>
+
+<div id="alerts"></div>
+
+<!-- Schema extraction panels -->
+<div class="schema-panels">
+    <!-- Source schema -->
+    <div class="schema-panel">
+        <h3>{{ t('mapping_source_fields') }}</h3>
+        <div class="upload-area">
+            <form id="source-upload-form" enctype="multipart/form-data">
+                <input type="hidden" name="side" value="source">
+                <input type="file" name="sample_file" accept=".json,.xml,.csv,.tsv,.xls,.xlsx">
+                <button type="submit" class="btn btn-secondary" style="font-size:13px;">{{ t('mapping_analyze') }}</button>
+            </form>
+            <details style="margin-top:8px;">
+                <summary style="cursor:pointer; font-size:13px; color:#666;">{{ t('mapping_or_paste') }}</summary>
+                <textarea id="source-paste" placeholder='{"invoice": {"number": "INV-001", ...}}'></textarea>
+                <button class="btn btn-secondary" style="font-size:12px; margin-top:4px;" onclick="analyzeFromPaste('source')">{{ t('mapping_analyze') }}</button>
+            </details>
+        </div>
+        <div id="source-fields" class="field-list">
+            <div class="empty-state">{{ t('mapping_upload_source') }}</div>
+        </div>
+    </div>
+
+    <!-- Target schema -->
+    <div class="schema-panel">
+        <h3>{{ t('mapping_target_fields') }}</h3>
+        <div class="upload-area">
+            <form id="target-upload-form" enctype="multipart/form-data">
+                <input type="hidden" name="side" value="target">
+                <input type="file" name="sample_file" accept=".json,.xml,.csv,.tsv,.xls,.xlsx">
+                <button type="submit" class="btn btn-secondary" style="font-size:13px;">{{ t('mapping_analyze') }}</button>
+            </form>
+            <details style="margin-top:8px;">
+                <summary style="cursor:pointer; font-size:13px; color:#666;">{{ t('mapping_or_paste') }}</summary>
+                <textarea id="target-paste" placeholder='{"TXML": {"Invoice": {"InvoiceNumber": "", ...}}}'></textarea>
+                <button class="btn btn-secondary" style="font-size:12px; margin-top:4px;" onclick="analyzeFromPaste('target')">{{ t('mapping_analyze') }}</button>
+            </details>
+        </div>
+        <div id="target-fields" class="field-list">
+            <div class="empty-state">{{ t('mapping_upload_target') }}</div>
+        </div>
+    </div>
+</div>
+
+<!-- Mappings -->
+<div class="mappings-card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+        <h3 style="margin:0;">{{ t('mapping_editor_title') }}</h3>
+        <div style="display:flex; gap:8px;">
+            {% if ai_enabled %}
+            <button id="btn-ai-suggest" class="btn btn-ai" onclick="aiSuggest()" disabled>
+                {{ t('mapping_ai_suggest') }}
+            </button>
+            {% else %}
+            <span class="reasoning-tooltip" title="{{ t('mapping_no_ai') }}">{{ t('mapping_ai_suggest') }} ⚠️</span>
+            {% endif %}
+            <button class="btn btn-secondary" onclick="addManualMapping()">{{ t('mapping_add_manual') }}</button>
+            <button class="btn btn-success" onclick="saveMappings()">{{ t('mapping_save') }}</button>
+        </div>
+    </div>
+    <div id="mappings-container">
+        <!-- Mapping rows are rendered here by JS -->
+    </div>
+</div>
+
+<script>
+var integrationId = {{ integration.id|tojson }};
+var sourceSchema = [];
+var targetSchema = [];
+var currentMappings = [];
+
+// Load existing mappings from integration config
+(function loadExisting() {
+    var transform = {{ integration.transform|tojson }};
+    if (transform && transform.field_mappings) {
+        currentMappings = transform.field_mappings.map(function(m) {
+            return {
+                source_path: m.source_path || '',
+                target_path: m.target_path || '',
+                transform: m.transform || null,
+                confidence: 1.0,
+                reasoning: 'Existing mapping'
+            };
+        });
+        renderMappings();
+    }
+})();
+
+// --- Schema extraction ---
+document.getElementById('source-upload-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    analyzeFile(this, 'source');
+});
+document.getElementById('target-upload-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    analyzeFile(this, 'target');
+});
+
+function analyzeFile(form, side) {
+    var fd = new FormData(form);
+    fd.set('side', side);
+    fetch('/mapping/analyze', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                if (side === 'source') sourceSchema = data.fields;
+                else targetSchema = data.fields;
+                renderFields(side, data.fields);
+                updateAiButton();
+            } else {
+                showAlert(data.error, 'error');
+            }
+        })
+        .catch(function(err) { showAlert('Error: ' + err, 'error'); });
+}
+
+function analyzeFromPaste(side) {
+    var text = document.getElementById(side + '-paste').value.trim();
+    if (!text) return;
+    var fd = new FormData();
+    fd.set('side', side);
+    fd.set('pasted_data', text);
+    fd.set('content_type', 'application/json');
+    fetch('/mapping/analyze', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                if (side === 'source') sourceSchema = data.fields;
+                else targetSchema = data.fields;
+                renderFields(side, data.fields);
+                updateAiButton();
+            } else {
+                showAlert(data.error, 'error');
+            }
+        })
+        .catch(function(err) { showAlert('Error: ' + err, 'error'); });
+}
+
+function renderFields(side, fields) {
+    var container = document.getElementById(side + '-fields');
+    if (!fields.length) {
+        container.innerHTML = '<div class="empty-state">{{ t("mapping_no_fields") }}</div>';
+        return;
+    }
+    container.innerHTML = fields.map(function(f) {
+        var sample = f.sample ? ' = ' + String(f.sample).substring(0, 40) : '';
+        return '<div class="field-item"><span class="path">' + escHtml(f.path) + '</span><span class="meta">[' + f.type + ']' + escHtml(sample) + '</span></div>';
+    }).join('');
+}
+
+// --- AI suggest ---
+function updateAiButton() {
+    var btn = document.getElementById('btn-ai-suggest');
+    if (btn) btn.disabled = !(sourceSchema.length && targetSchema.length);
+}
+
+function aiSuggest() {
+    var btn = document.getElementById('btn-ai-suggest');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>{{ t("mapping_ai_suggesting") }}';
+
+    fetch('/mapping/ai-suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            source_schema: sourceSchema,
+            target_schema: targetSchema,
+            context: ''
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.innerHTML = '{{ t("mapping_ai_suggest") }}';
+        btn.disabled = false;
+        if (data.ok) {
+            currentMappings = data.mappings;
+            renderMappings();
+            showAlert('AI suggested ' + data.mappings.length + ' mappings', 'info');
+        } else {
+            showAlert(data.error, 'error');
+        }
+    })
+    .catch(function(err) {
+        btn.innerHTML = '{{ t("mapping_ai_suggest") }}';
+        btn.disabled = false;
+        showAlert('Error: ' + err, 'error');
+    });
+}
+
+// --- Mapping rows ---
+function renderMappings() {
+    var container = document.getElementById('mappings-container');
+    if (!currentMappings.length) {
+        container.innerHTML = '<div class="empty-state">{{ t("mapping_add_manual") }}</div>';
+        return;
+    }
+    container.innerHTML = currentMappings.map(function(m, i) {
+        var confClass = m.confidence >= 0.8 ? 'confidence-high' : m.confidence >= 0.5 ? 'confidence-medium' : 'confidence-low';
+        var confPct = Math.round(m.confidence * 100) + '%';
+        var tooltip = m.reasoning ? ' title="' + escAttr(m.reasoning) + '"' : '';
+        return '<div class="mapping-row" data-idx="' + i + '">' +
+            '<select onchange="updateMapping(' + i + ',\'source_path\',this.value)">' + fieldOptions(sourceSchema, m.source_path) + '</select>' +
+            '<div class="arrow">→</div>' +
+            '<select onchange="updateMapping(' + i + ',\'target_path\',this.value)">' + fieldOptions(targetSchema, m.target_path) + '</select>' +
+            '<input type="text" value="' + escAttr(m.transform || '') + '" placeholder="{{ t("mapping_transform") }}" onchange="updateMapping(' + i + ',\'transform\',this.value)">' +
+            '<span class="confidence-badge ' + confClass + '"' + tooltip + '>' + confPct + '</span>' +
+            '<button class="btn-remove" onclick="removeMapping(' + i + ')">✕</button>' +
+            '</div>';
+    }).join('');
+}
+
+function fieldOptions(schema, selected) {
+    var html = '<option value="">—</option>';
+    // If selected value not in schema, add it manually
+    var paths = schema.map(function(f) { return f.path; });
+    if (selected && paths.indexOf(selected) === -1) {
+        html += '<option value="' + escAttr(selected) + '" selected>' + escHtml(selected) + ' *</option>';
+    }
+    schema.forEach(function(f) {
+        var sel = f.path === selected ? ' selected' : '';
+        html += '<option value="' + escAttr(f.path) + '"' + sel + '>' + escHtml(f.path) + '</option>';
+    });
+    return html;
+}
+
+function updateMapping(idx, field, value) {
+    if (currentMappings[idx]) currentMappings[idx][field] = value || null;
+}
+
+function removeMapping(idx) {
+    currentMappings.splice(idx, 1);
+    renderMappings();
+}
+
+function addManualMapping() {
+    currentMappings.push({ source_path: '', target_path: '', transform: null, confidence: 1.0, reasoning: 'Manual' });
+    renderMappings();
+}
+
+// --- Save ---
+function saveMappings() {
+    var valid = currentMappings.filter(function(m) { return m.source_path && m.target_path; });
+    fetch('/mapping/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integration_id: integrationId, mappings: valid })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) showAlert('{{ t("mapping_saved") }}', 'info');
+        else showAlert(data.error, 'error');
+    })
+    .catch(function(err) { showAlert('Error: ' + err, 'error'); });
+}
+
+// --- Helpers ---
+function showAlert(msg, type) {
+    var el = document.getElementById('alerts');
+    el.innerHTML = '<div class="alert alert-' + type + '">' + escHtml(msg) + '</div>';
+    setTimeout(function() { el.innerHTML = ''; }, 6000);
+}
+function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escAttr(s) { return String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+</script>
+{% endblock %}
