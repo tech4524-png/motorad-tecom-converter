@@ -76,6 +76,11 @@ DEFAULT_CONFIG = {
         },
     ],
     "country_overrides": {},
+    # User-created integrations (Phase 2+). Each entry is a full integration
+    # config dict as defined in core/integration.py. Builtin profiles (tecom,
+    # ordrsp) are NOT stored here — they are generated on-the-fly from the
+    # profiles list above.
+    "integrations": [],
     "app_version": "1.2.0",
     "language": "he",
 }
@@ -171,3 +176,76 @@ def resolve_country_code(country_name, cfg):
         return overrides[key]
     table = load_country_codes()
     return table.get(key)
+
+
+# ---------------------------------------------------------------------------
+# Integration CRUD (for user-created integrations, Phase 2+)
+# ---------------------------------------------------------------------------
+
+def get_integrations(cfg):
+    """Return the list of user-created integration configs."""
+    return cfg.get("integrations", [])
+
+
+def get_integration_by_id(cfg, integration_id):
+    """Find a single integration by ID. Returns None if not found."""
+    for integ in cfg.get("integrations", []):
+        if integ.get("id") == integration_id:
+            return integ
+    return None
+
+
+def add_integration(cfg, integration_config):
+    """Add a new user-created integration to the config.
+
+    Validates the config before adding. Returns (success, error_message).
+    """
+    from .core.integration import validate_integration_config
+
+    errors = validate_integration_config(integration_config)
+    if errors:
+        return False, "; ".join(errors)
+
+    # Check for duplicate ID
+    existing = get_integration_by_id(cfg, integration_config["id"])
+    if existing:
+        return False, f"Integration with ID {integration_config['id']!r} already exists"
+
+    cfg.setdefault("integrations", []).append(integration_config)
+    save_config(cfg)
+    return True, ""
+
+
+def update_integration(cfg, integration_id, updates):
+    """Update an existing integration config (partial update).
+
+    Returns (success, error_message).
+    """
+    for i, integ in enumerate(cfg.get("integrations", [])):
+        if integ.get("id") == integration_id:
+            # Merge updates into the existing config
+            _deep_merge(integ, updates)
+            save_config(cfg)
+            return True, ""
+    return False, f"Integration {integration_id!r} not found"
+
+
+def delete_integration(cfg, integration_id):
+    """Remove a user-created integration. Returns (success, error_message)."""
+    integrations = cfg.get("integrations", [])
+    for i, integ in enumerate(integrations):
+        if integ.get("id") == integration_id:
+            integrations.pop(i)
+            save_config(cfg)
+            return True, ""
+    return False, f"Integration {integration_id!r} not found"
+
+
+def toggle_integration(cfg, integration_id, enabled):
+    """Enable or disable an integration. Returns (success, error_message)."""
+    for integ in cfg.get("integrations", []):
+        if integ.get("id") == integration_id:
+            integ["enabled"] = enabled
+            save_config(cfg)
+            return True, ""
+    return False, f"Integration {integration_id!r} not found"
