@@ -1,0 +1,18 @@
+# Build / runtime output
+build_env/
+dist/
+build/_work/
+__pycache__/
+*.pyc
+tests/_run/
+
+# Local config, log DB and backups (may hold credentials / customer data)
+config.json
+*.db
+backups/
+
+# Customer sample invoices (real data) - tests/test_conversion.py needs them,
+# keep local copies in tests/sample_files/ but do not commit them
+tests/sample_files/*.XLS
+tests/sample_files/*.xls
+tests/sample_files/*.xlsx

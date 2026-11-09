@@ -1,0 +1,6 @@
+Flask>=3.0,<4.0
+waitress>=3.0,<4.0
+lxml>=5.0,<7.0
+watchdog>=4.0,<7.0
+packaging>=23.0
+pywin32>=306 ; sys_platform == "win32"

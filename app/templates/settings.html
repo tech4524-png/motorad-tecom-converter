@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t('settings_title') }}</h1>
+
+<form method="post">
+<div class="card">
+    <h2>{{ t('settings_seller_h2') }}</h2>
+    <div class="grid-2">
+        <div>
+            <label>{{ t('settings_field_name1') }}</label>
+            <input type="text" name="name1" value="{{ cfg.seller.name1 }}">
+            <label>{{ t('settings_field_street1') }}</label>
+            <input type="text" name="street1" value="{{ cfg.seller.street1 }}">
+            <label>{{ t('settings_field_postal_code') }}</label>
+            <input type="text" name="postal_code" value="{{ cfg.seller.postal_code }}">
+            <label>{{ t('settings_field_city') }}</label>
+            <input type="text" name="city" value="{{ cfg.seller.city }}">
+            <label>{{ t('settings_field_country_code') }}</label>
+            <input type="text" name="country_code" value="{{ cfg.seller.country_code }}" maxlength="2">
+            <label>{{ t('settings_field_country_name') }}</label>
+            <input type="text" name="country_name" value="{{ cfg.seller.country_name }}">
+        </div>
+        <div>
+            <label>{{ t('settings_field_tax_registration_number') }}</label>
+            <input type="text" name="tax_registration_number" value="{{ cfg.seller.tax_registration_number }}">
+            <label>{{ t('settings_field_contact_name') }}</label>
+            <input type="text" name="contact_name" value="{{ cfg.seller.contact_name }}">
+            <label>{{ t('settings_field_contact_phone') }}</label>
+            <input type="text" name="contact_phone" value="{{ cfg.seller.contact_phone }}">
+            <label>{{ t('settings_field_contact_email') }}</label>
+            <input type="email" name="contact_email" value="{{ cfg.seller.contact_email }}">
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>{{ t('settings_constants_h2') }}</h2>
+    <div class="grid-2">
+        <div>
+            <label>{{ t('settings_field_message_type') }}</label>
+            <input type="text" name="message_type" value="{{ cfg.seller.message_type }}">
+            <label>{{ t('settings_field_message_function') }}</label>
+            <input type="text" name="message_function" value="{{ cfg.seller.message_function }}">
+        </div>
+        <div>
+            <label>{{ t('settings_field_tax_treatment_code') }}</label>
+            <input type="text" name="tax_treatment_code" value="{{ cfg.seller.tax_treatment_code }}">
+            <label>{{ t('settings_field_maker_code') }}</label>
+            <input type="text" name="maker_code" value="{{ cfg.seller.maker_code }}">
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>{{ t('settings_bank_h2') }}</h2>
+    <div class="grid-2">
+        <div>
+            <label>{{ t('settings_field_bank_name') }}</label>
+            <input type="text" name="bank_name" value="{{ cfg.banking.bank_name }}">
+            <label>{{ t('settings_field_bank_account') }}</label>
+            <input type="text" name="bank_account" value="{{ cfg.banking.bank_account }}">
+        </div>
+        <div>
+            <label>{{ t('settings_field_bank_code_number') }}</label>
+            <input type="text" name="bank_code_number" value="{{ cfg.banking.bank_code_number }}">
+            <label>{{ t('settings_field_iban') }}</label>
+            <input type="text" name="iban" value="{{ cfg.banking.iban }}">
+            <label>{{ t('settings_field_swift_bic') }}</label>
+            <input type="text" name="swift_bic" value="{{ cfg.banking.swift_bic }}">
+        </div>
+    </div>
+    <button type="submit">{{ t('settings_save') }}</button>
+</div>
+</form>
+
+<div class="card">
+    <h2>{{ t('settings_password_h2') }}</h2>
+    <form method="post" action="{{ url_for('change_password') }}">
+        <div class="grid-2">
+            <div>
+                <label>{{ t('settings_field_current_password') }}</label>
+                <input type="password" name="current_password" required>
+            </div>
+            <div>
+                <label>{{ t('settings_field_new_password') }}</label>
+                <input type="password" name="new_password" required>
+                <label>{{ t('settings_field_confirm_password') }}</label>
+                <input type="password" name="confirm_password" required>
+            </div>
+        </div>
+        <button type="submit">{{ t('settings_password_save') }}</button>
+    </form>
+</div>
+{% endblock %}

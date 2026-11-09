@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t('countries_title') }}</h1>
+<p class="small-note">{{ t('countries_intro', count=base_table|length) }}</p>
+
+<div class="card">
+    <h2>{{ t('countries_add_h2') }}</h2>
+    <form method="post">
+        <input type="hidden" name="action" value="add">
+        <div class="grid-2">
+            <div>
+                <label>{{ t('countries_field_name') }}</label>
+                <input type="text" name="name" placeholder="HOLLAND" required>
+            </div>
+            <div>
+                <label>{{ t('countries_field_code') }}</label>
+                <input type="text" name="code" maxlength="2" placeholder="NL" required>
+            </div>
+        </div>
+        <button type="submit">{{ t('countries_add_submit') }}</button>
+    </form>
+</div>
+
+{% if cfg.country_overrides %}
+<div class="card">
+    <h2>{{ t('countries_overrides_h2') }}</h2>
+    <table>
+        <thead><tr><th>{{ t('countries_col_name') }}</th><th>{{ t('countries_col_code') }}</th><th></th></tr></thead>
+        <tbody>
+        {% for name, code in cfg.country_overrides.items() %}
+            <tr>
+                <td>{{ name }}</td>
+                <td>{{ code }}</td>
+                <td>
+                    <form method="post" style="margin:0;">
+                        <input type="hidden" name="action" value="delete">
+                        <input type="hidden" name="name" value="{{ name }}">
+                        <button type="submit" class="secondary">{{ t('countries_delete') }}</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

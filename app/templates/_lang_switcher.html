@@ -1,0 +1,11 @@
+{# Small inline language switcher, reused on both the logged-in nav bar and the login screen. #}
+<span class="lang-switch">
+    {% for code, label in LANGUAGES.items() %}
+        {% if code == current_lang %}
+            <span class="lang-current">{{ label }}</span>
+        {% else %}
+            <a href="{{ url_for('set_language', lang_code=code) }}">{{ label }}</a>
+        {% endif %}
+        {% if not loop.last %}<span class="lang-sep">|</span>{% endif %}
+    {% endfor %}
+</span>
