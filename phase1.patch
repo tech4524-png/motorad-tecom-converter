@@ -1,0 +1,2734 @@
+From 63a3f4e1c3ecf46a6aec6a5c499e55de88336704 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 12:51:43 +0200
+Subject: [PATCH] =?UTF-8?q?feat:=20Phase=201=20=E2=80=94=20Integration=20E?=
+ =?UTF-8?q?ngine=20Foundation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Build the core integration framework that transforms MotoGateway from a
+single-purpose converter into a generic integration platform.
+
+New modules:
+- app/core/integration.py — Integration model, config schema, runner,
+  source/destination/transform registries
+- app/core/transform.py — Declarative mapping engine with dot-path
+  navigation, date/lookup/string transforms, array iteration
+- app/core/source_manager.py — File source readers (CSV, TSV, JSON, XML)
+  with auto-detection by extension
+- app/core/dest_manager.py — File destination writers (JSON, XML, CSV)
+  with dict-to-XML conversion
+- app/builtin/tecom_integration.py — Wraps existing TECOM builder as a
+  "custom" transform integration
+- app/builtin/ordrsp_integration.py — Wraps existing OrdRsp builder the
+  same way
+
+Modified:
+- app/engine.py — Registers builtins at startup; adds process_integration()
+  for user-created integrations; legacy process_file() path unchanged
+- app/config.py — Adds integrations[] to config schema with CRUD functions
+- app/watcher.py — IntegrationHandler watches user-created integration dirs
+
+Tests: 40 new tests covering model, transform, source, destination,
+registration, config CRUD, and end-to-end CSV→mapping→JSON pipeline.
+All existing behavior preserved — zero changes to FORMAT_HANDLERS path.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Cy4f1x3BWJRU4PKYURko1f
+---
+ ARCHITECTURE.md                     | 297 ++++++++++++++
+ app/builtin/__init__.py             |  16 +
+ app/builtin/ordrsp_integration.py   |  93 +++++
+ app/builtin/tecom_integration.py    | 119 ++++++
+ app/config.py                       |  78 ++++
+ app/core/__init__.py                |   1 +
+ app/core/dest_manager.py            | 194 +++++++++
+ app/core/integration.py             | 272 +++++++++++++
+ app/core/source_manager.py          | 192 +++++++++
+ app/core/transform.py               | 406 +++++++++++++++++++
+ app/destinations/__init__.py        |   1 +
+ app/engine.py                       | 135 +++++++
+ app/sources/__init__.py             |   1 +
+ app/watcher.py                      |  97 ++++-
+ tests/test_integration_framework.py | 598 ++++++++++++++++++++++++++++
+ 15 files changed, 2493 insertions(+), 7 deletions(-)
+ create mode 100644 ARCHITECTURE.md
+ create mode 100644 app/builtin/__init__.py
+ create mode 100644 app/builtin/ordrsp_integration.py
+ create mode 100644 app/builtin/tecom_integration.py
+ create mode 100644 app/core/__init__.py
+ create mode 100644 app/core/dest_manager.py
+ create mode 100644 app/core/integration.py
+ create mode 100644 app/core/source_manager.py
+ create mode 100644 app/core/transform.py
+ create mode 100644 app/destinations/__init__.py
+ create mode 100644 app/sources/__init__.py
+ create mode 100644 tests/test_integration_framework.py
+
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+new file mode 100644
+index 0000000..5578aa3
+--- /dev/null
++++ b/ARCHITECTURE.md
+@@ -0,0 +1,297 @@
++# MotoGateway v2 — Architecture Document
++
++> מסמך ארכיטקטורה ותכנון. גרסה: 0.1 | תאריך: 2026-11-09
++
++---
++
++## 1. חזון
++
++להפוך את MotoGateway מכלי המרה ספציפי (Priority → TECOM) לפלטפורמת אינטגרציה גנרית שמאפשרת למשתמש קצה — גם ללא רקע טכני — לבנות ממשקים בין מערכות בעצמו.
++
++המערכת נבנית על בסיס הקוד הקיים (v1.3.3) עם refactor משמעותי, תוך שמירה על תאימות אחורה מלאה ללקוחות קיימים.
++
++## 2. עקרונות מנחים
++
++- **גנרי קודם** — הארכיטקטורה לא תלויה ב-Priority או בפורמט ספציפי. Priority הוא first-class citizen אבל לא הנחת יסוד.
++- **דקלרטיבי** — כל integration מוגדר כ-JSON config, לא כקוד. המנוע מפרש את ההגדרה.
++- **AI-assisted** — מיפוי שדות נעשה באמצעות LLM (OpenAI/Claude API) ומוצג ויזואלית לאישור המשתמש.
++- **On-premise** — המערכת רצה על שרת הלקוח, ליד המערכות שהיא מתממשקת אליהן. אין תלות בענן (למעט קריאות AI API אופציונליות).
++- **פשטות למשתמש** — ממשק wizard שמוביל צעד אחר צעד. אין צורך בכתיבת קוד.
++
++## 3. מודל הליבה: Integration
++
++כל ממשק שמשתמש בונה הוא **Integration** — הגדרה דקלרטיבית עם שלושה חלקים:
++
++```
++┌──────────┐      ┌─────────────┐      ┌──────────────┐
++│  Source   │ ──>  │  Transform  │ ──>  │ Destination  │
++│  (קלט)   │      │  (מיפוי)    │      │   (פלט)      │
++└──────────┘      └─────────────┘      └──────────────┘
++```
++
++### 3.1 Source — מאיפה מגיע המידע
++
++| סוג         | תיאור                                                        | שלב |
++|-------------|--------------------------------------------------------------|-----|
++| **File**    | ניטור תיקייה (כמו היום), קריאת קבצים בפורמטים שונים         | 1   |
++| **Webhook** | המערכת מחוללת URL ייחודי, חברה חיצונית שולחת אליו נתונים    | 2   |
++| **API Poll**| המערכת קוראת ל-API חיצוני בתזמון קבוע ושואבת נתונים         | 2   |
++| **Upload**  | המשתמש מעלה קובץ ידנית דרך הממשק                            | 1   |
++| **FTP/SFTP**| המערכת שואבת קבצים משרת FTP מרוחק                           | 5   |
++
++### 3.2 Transform — מה עושים עם המידע
++
++הלב של המערכת. מיפוי דקלרטיבי שמגדיר כיצד שדות ממקור הופכים לשדות ביעד.
++
++```json
++{
++  "field_mappings": [
++    {
++      "source_path": "invoice.header.invoice_number",
++      "target_path": "TXML.Invoice.InvoiceHeader.InvoiceNumber",
++      "transform": null
++    },
++    {
++      "source_path": "invoice.header.date",
++      "target_path": "TXML.Invoice.InvoiceHeader.InvoiceDate",
++      "transform": "date_format('DD/MM/YYYY', 'YYYY-MM-DD')"
++    },
++    {
++      "source_path": "invoice.lines[].unit_price * invoice.lines[].quantity",
++      "target_path": "TXML.Invoice.Lines[].LineTotal",
++      "transform": "calculate"
++    }
++  ]
++}
++```
++
++**יכולות Transform:**
++- מיפוי ישיר (field → field)
++- המרת פורמטים (תאריכים, מספרים, קידוד)
++- חישובים (שדה × שדה, סכימה)
++- lookup tables (כמו country codes היום)
++- ערכי ברירת מחדל וקבועים
++- תנאים (אם שדה X ריק, השתמש ב-Y)
++
++**יצירת המיפוי — תהליך AI:**
++1. המשתמש מעלה דוגמא לנתוני מקור (קובץ, JSON, XML)
++2. המשתמש מעלה דוגמא/schema של הפורמט הנדרש ביעד
++3. המערכת שולחת את שתי הדוגמאות ל-LLM API
++4. ה-LLM מחזיר מיפוי מוצע בפורמט JSON
++5. המערכת מציגה את המיפוי ויזואלית (source field ↔ target field)
++6. המשתמש מאשר, מתקן, או מוסיף כללים
++7. המיפוי נשמר כחלק מה-Integration config
++
++### 3.3 Destination — לאן הולך הפלט
++
++| סוג             | תיאור                                                      | שלב |
++|-----------------|-------------------------------------------------------------|-----|
++| **File**        | כתיבה לתיקייה בפורמט הנדרש (XML, JSON, CSV, XLS...)       | 1   |
++| **API**         | שליחת הנתונים ל-API חיצוני (REST)                          | 2   |
++| **Priority**    | כתיבה ל-Priority דרך OData API                             | 5   |
++| **FTP/SFTP**    | העלאת קובץ הפלט לשרת FTP מרוחק                            | 5   |
++
++## 4. מבנה ה-Integration Config
++
++כל integration נשמר כ-JSON:
++
++```json
++{
++  "id": "inv-tecom-001",
++  "name": "חשבוניות מוטוראד → TECOM",
++  "enabled": true,
++  "created_at": "2026-11-09T10:00:00",
++
++  "source": {
++    "type": "file",
++    "config": {
++      "watch_dir": "C:/invoices/input",
++      "file_pattern": "*.xls",
++      "format": "xls_tab_delimited"
++    }
++  },
++
++  "transform": {
++    "field_mappings": [ ... ],
++    "lookup_tables": {
++      "country_codes": { "ISRAEL": "IL", "GERMANY": "DE" }
++    },
++    "constants": {
++      "message_type": "Invoice",
++      "message_function": "Original"
++    }
++  },
++
++  "destination": {
++    "type": "file",
++    "config": {
++      "output_dir": "C:/invoices/output",
++      "format": "xml",
++      "template": "txml_2.5"
++    }
++  },
++
++  "error_handling": {
++    "error_dir": "C:/invoices/errors",
++    "archive_dir": "C:/invoices/archive",
++    "on_error": "move_to_error_dir"
++  }
++}
++```
++
++## 5. תאימות אחורה — Builtin Integrations
++
++ממשקי TECOM ו-OrdRsp הקיימים הופכים ל-builtin integrations. הם:
++- מוגדרים מראש במערכת ולא ניתנים למחיקה
++- משתמשים בקוד ההמרה הקיים (tecom_xml.py, ordrsp_xml.py) כ-custom transform
++- ממשיכים לעבוד בדיוק כמו ב-v1.x, כולל ממשק הפרופילים הנוכחי
++- משמשים כדוגמא למשתמשים שרוצים לבנות integrations דומים
++
++## 6. ארכיטקטורת המערכת
++
++```
++┌─────────────────────────────────────────────────────────┐
++│                     Web UI (Flask)                       │
++│  ┌──────────┐ ┌───────────┐ ┌────────┐ ┌────────────┐  │
++│  │  Wizard  │ │  Mapping  │ │  Log   │ │  Settings  │  │
++│  │ (חדש)   │ │ Editor    │ │(קיים)  │ │  (קיים)    │  │
++│  │         │ │ (חדש)     │ │        │ │            │  │
++│  └──────────┘ └───────────┘ └────────┘ └────────────┘  │
++├─────────────────────────────────────────────────────────┤
++│                  Integration Engine                      │
++│  ┌────────────┐ ┌─────────────┐ ┌───────────────────┐  │
++│  │  Source     │ │  Transform  │ │   Destination     │  │
++│  │  Manager   │ │  Engine     │ │   Manager         │  │
++│  │            │ │             │ │                   │  │
++│  │ - File     │ │ - Mapper    │ │ - File Writer    │  │
++│  │ - Webhook  │ │ - Converter │ │ - API Client     │  │
++│  │ - API Poll │ │ - Validator │ │ - Priority OData │  │
++│  │ - Upload   │ │             │ │ - FTP            │  │
++│  │ - FTP      │ │             │ │                   │  │
++│  └────────────┘ └─────────────┘ └───────────────────┘  │
++├─────────────────────────────────────────────────────────┤
++│                   Infrastructure                         │
++│  ┌──────┐ ┌────────┐ ┌──────────┐ ┌──────────────────┐ │
++│  │Config│ │   DB   │ │ Watcher  │ │  AI Client       │ │
++│  │(JSON)│ │(SQLite)│ │(watchdog)│ │ (OpenAI/Claude)  │ │
++│  └──────┘ └────────┘ └──────────┘ └──────────────────┘ │
++├─────────────────────────────────────────────────────────┤
++│              Windows Service (pywin32)                    │
++└─────────────────────────────────────────────────────────┘
++```
++
++## 7. AI Integration — הגדרת מפתחות
++
++המשתמש מגדיר בהגדרות:
++- **AI Provider**: OpenAI / Anthropic (Claude) / None (מיפוי ידני בלבד)
++- **API Key**: מפתח ה-API (מוצפן על הדיסק כמו הסיסמה היום)
++- **Model**: בחירת מודל (gpt-4o, claude-sonnet, וכו')
++
++כשאין מפתח AI מוגדר, המשתמש עדיין יכול לבנות מיפוי ידנית דרך הממשק הויזואלי.
++
++## 8. פורמטי קבצים נתמכים
++
++### קלט (Source formats):
++- XLS / XLSX (tab-delimited ורגיל)
++- CSV / TSV
++- JSON
++- XML
++- Fixed-width text
++
++### פלט (Destination formats):
++- XML (עם template support)
++- JSON
++- CSV
++- XLS/XLSX
++
++פורמטים נוספים יתווספו לפי דרישה.
++
++## 9. Roadmap — שלבי פיתוח
++
++### שלב 1: Integration Engine Foundation
++- Refactor ל-engine.py — מעבר ל-integration config דקלרטיבי
++- מודל Integration ב-config (JSON schema)
++- Integration runner שקורא config ומבצע source → transform → destination
++- עטיפת TECOM + OrdRsp כ-builtin integrations
++- בדיקה שהכל עובד כמו קודם (backward compatibility)
++
++### שלב 2: Webhook + API
++- Flask routes לחולל ולנהל webhook endpoints
++- Webhook receiver — קבלת POST, validation, העברה ל-pipeline
++- API polling engine — תזמון קריאות, שמירת state
++- UI לניהול webhooks ו-API connections
++
++### שלב 3: AI Mapping
++- אינטגרציה עם OpenAI/Claude API
++- Parser לדוגמאות קבצים (חילוץ schema אוטומטי)
++- Prompt engineering למיפוי שדות
++- שמירת מיפוי כ-JSON
++- UI ויזואלי להצגת ועריכת מיפוי (source ↔ target)
++
++### שלב 4: Integration Wizard
++- UI wizard מלא: source → samples → mapping → destination → activate
++- תצוגת dashboard של כל ה-integrations הפעילים
++- ניטור ו-monitoring בזמן אמת
++- Test run — הרצת integration על דוגמא לפני הפעלה
++
++### שלב 5: Connectors מתקדמים
++- FTP/SFTP source + destination
++- Priority OData connector (קריאה + כתיבה)
++- Connector framework להוספת מערכות נוספות
++
++## 10. מבנה תיקיות מוצע (לאחר refactor)
++
++```
++app/
++  core/
++    integration.py      - מודל Integration + runner
++    transform.py        - מנוע המיפוי הדקלרטיבי
++    source_manager.py   - ניהול sources (file, webhook, api, upload)
++    dest_manager.py     - ניהול destinations (file, api, ftp)
++    ai_mapper.py        - חיבור ל-LLM APIs למיפוי אוטומטי
++  
++  sources/
++    file_source.py      - קריאת קבצים (מחליף חלקית את xls_reader)
++    webhook_source.py   - קבלת webhooks
++    api_source.py       - polling מ-APIs
++    ftp_source.py       - קריאה מ-FTP
++  
++  destinations/
++    file_dest.py        - כתיבה לקובץ
++    api_dest.py         - שליחה ל-API
++    priority_dest.py    - כתיבה ל-Priority OData
++    ftp_dest.py         - העלאה ל-FTP
++  
++  builtin/
++    tecom_xml.py        - (קוד קיים) בונה TXML 2.5
++    ordrsp_xml.py       - (קוד קיים) בונה OrdRsp XML
++    xls_reader.py       - (קוד קיים) קורא XLS
++    ordrsp_reader.py    - (קוד קיים) קורא OrdRsp
++  
++  web/
++    webapp.py           - (קיים, מורחב)
++    wizard.py           - routes ל-wizard חדש
++    api_routes.py       - REST API פנימי + webhook endpoints
++  
++  config.py             - (קיים, מורחב)
++  db.py                 - (קיים, מורחב)
++  watcher.py            - (קיים, מותאם)
++  i18n.py               - (קיים)
++  engine.py             - (קיים, הופך לעטיפה שקוראת ל-core/integration.py)
++
++  static/               - (קיים + חדש)
++  templates/            - (קיים + חדש)
++```
++
++## 11. החלטות טכניות
++
++| נושא | החלטה | נימוק |
++|-------|--------|-------|
++| שפת תכנות | Python (כמו היום) | קוד קיים, אקוסיסטם עשיר |
++| Web framework | Flask (כמו היום) | עובד, פשוט, מספיק |
++| DB | SQLite (כמו היום) | on-prem, בלי תלויות |
++| Config | JSON files (כמו היום) | פשוט, קריא, editable |
++| AI | OpenAI / Claude API (configurable) | המשתמש מביא מפתח |
++| Deployment | Windows Service (כמו היום) | on-prem, ליד Priority |
++| מיפוי | JSON דקלרטיבי | לא דורש קוד, ניתן לעריכה ב-UI |
++| Webhooks | Flask routes על אותו שרת | פשוט, אין שירות נוסף |
+diff --git a/app/builtin/__init__.py b/app/builtin/__init__.py
+new file mode 100644
+index 0000000..38a848e
+--- /dev/null
++++ b/app/builtin/__init__.py
+@@ -0,0 +1,16 @@
++"""
++app/builtin — Preset integrations wrapping existing converters.
++
++Calling register_all() registers every builtin integration's source,
++destination, and custom-transform handlers with the core integration
++framework.  Called once at app startup.
++"""
++
++
++def register_all():
++    """Register all builtin integrations."""
++    from .tecom_integration import register as register_tecom
++    from .ordrsp_integration import register as register_ordrsp
++
++    register_tecom()
++    register_ordrsp()
+diff --git a/app/builtin/ordrsp_integration.py b/app/builtin/ordrsp_integration.py
+new file mode 100644
+index 0000000..efe5168
+--- /dev/null
++++ b/app/builtin/ordrsp_integration.py
+@@ -0,0 +1,93 @@
++"""
++Builtin OrdRsp (Order Response) integration.
++
++Wraps the existing ordrsp_xml.build_ordrsp_xml and ordrsp_reader as a
++declarative integration config with a "custom" transform type. The actual
++conversion code is untouched — this module simply registers it with the
++new integration framework.
++
++Completely independent from tecom_integration.py — same pattern, different
++format, no shared state.
++"""
++import logging
++from pathlib import Path
++from typing import Any
++
++from ..core.integration import (
++    make_integration_config,
++    register_custom_transform,
++)
++
++logger = logging.getLogger("motorad.builtin.ordrsp")
++
++# Stable integration ID
++ORDRSP_INTEGRATION_ID = "builtin-ordrsp"
++
++
++# ---------------------------------------------------------------------------
++# Custom transform wrapper
++# ---------------------------------------------------------------------------
++
++def _ordrsp_custom_transform(data: Any, app_config: dict) -> bytes:
++    """Delegate to the existing ordrsp_xml builder.
++
++    Same bridge pattern as tecom: data is raw rows, we group and build.
++    """
++    from ..ordrsp_xml import build_ordrsp_xml
++    from ..ordrsp_reader import group_by_order
++
++    groups = group_by_order(data)
++    if len(groups) != 1:
++        raise ValueError(
++            f"Expected exactly one order response per file, found {len(groups)}: "
++            f"{[g[0] for g in groups]}"
++        )
++    key, rows = groups[0]
++    return build_ordrsp_xml(key, rows, app_config)
++
++
++# ---------------------------------------------------------------------------
++# Integration config factory
++# ---------------------------------------------------------------------------
++
++def make_ordrsp_config(profile: dict, app_config: dict) -> dict:
++    """Build an OrdRsp integration config from an existing profile + app config."""
++    return make_integration_config(
++        name=profile.get("display_name", "OrdRsp Order Response"),
++        integration_id=ORDRSP_INTEGRATION_ID,
++        source_type="file",
++        source_config={
++            "format": "xls_tab_delimited",
++            "encoding": "utf-8-sig",
++        },
++        transform_config={
++            "type": "custom",
++            "custom_id": ORDRSP_INTEGRATION_ID,
++        },
++        destination_type="file",
++        destination_config={
++            "format": "xml",
++            "output_dir": profile.get("output_dir", ""),
++        },
++        enabled=profile.get("enabled", False),
++        error_handling={
++            "error_dir": profile.get("error_dir", ""),
++            "archive_dir": profile.get("archive_dir", ""),
++            "on_error": "move_to_error_dir",
++        },
++    )
++
++
++# ---------------------------------------------------------------------------
++# Registration
++# ---------------------------------------------------------------------------
++
++def register():
++    """Register OrdRsp builtin handlers with the integration framework.
++
++    Source and destination handlers are already registered by tecom_integration
++    (they share the same generic file handlers). Only the custom transform
++    needs registering here.
++    """
++    register_custom_transform(ORDRSP_INTEGRATION_ID, _ordrsp_custom_transform)
++    logger.info("Registered OrdRsp builtin integration")
+diff --git a/app/builtin/tecom_integration.py b/app/builtin/tecom_integration.py
+new file mode 100644
+index 0000000..0f07380
+--- /dev/null
++++ b/app/builtin/tecom_integration.py
+@@ -0,0 +1,119 @@
++"""
++Builtin TECOM Invoice integration.
++
++Wraps the existing tecom_xml.build_invoice_xml and xls_reader as a
++declarative integration config with a "custom" transform type. The actual
++conversion code is untouched — this module simply registers it with the
++new integration framework so engine.py can treat it like any other
++integration.
++
++The integration config is generated dynamically from the live app config
++(seller info, banking, etc.) so it always reflects the current settings.
++"""
++import logging
++from pathlib import Path
++from typing import Any
++
++from ..core.integration import (
++    make_integration_config,
++    register_source,
++    register_destination,
++    register_custom_transform,
++)
++from ..core.source_manager import read_file_source
++from ..core.dest_manager import write_file_destination
++
++logger = logging.getLogger("motorad.builtin.tecom")
++
++# Stable integration ID — used as key for custom transform registration
++TECOM_INTEGRATION_ID = "builtin-tecom"
++
++
++# ---------------------------------------------------------------------------
++# Custom transform wrapper
++# ---------------------------------------------------------------------------
++
++def _tecom_custom_transform(data: Any, app_config: dict) -> bytes:
++    """Delegate to the existing tecom_xml builder.
++
++    The existing build_invoice_xml expects (invoice_number, rows, cfg).
++    For the custom transform path, data arrives as (key, rows) tuple
++    from engine.py's grouping step, so this wrapper bridges the interface.
++
++    When called from IntegrationRunner.transform(), data is the raw
++    parsed rows (list of dicts) — the grouping and key extraction happen
++    in engine.py before calling transform.
++    """
++    from ..tecom_xml import build_invoice_xml
++    from ..xls_reader import group_by_invoice
++
++    # data is a list of row-dicts from the source reader
++    groups = group_by_invoice(data)
++    if len(groups) != 1:
++        raise ValueError(
++            f"Expected exactly one invoice per file, found {len(groups)}: "
++            f"{[g[0] for g in groups]}"
++        )
++    key, rows = groups[0]
++    return build_invoice_xml(key, rows, app_config)
++
++
++# ---------------------------------------------------------------------------
++# Integration config factory
++# ---------------------------------------------------------------------------
++
++def make_tecom_config(profile: dict, app_config: dict) -> dict:
++    """Build a TECOM integration config from an existing profile + app config.
++
++    This is called when engine.py processes a "tecom" profile, translating
++    the legacy profile dict into the new integration config format.
++
++    Args:
++        profile: The profile dict from config.json (id, input_dir, etc.)
++        app_config: The full app config (seller, banking, etc.)
++
++    Returns:
++        A valid integration config dict.
++    """
++    return make_integration_config(
++        name=profile.get("display_name", "TECOM Invoice"),
++        integration_id=TECOM_INTEGRATION_ID,
++        source_type="file",
++        source_config={
++            "format": "xls_tab_delimited",
++            "encoding": "utf-8-sig",
++        },
++        transform_config={
++            "type": "custom",
++            "custom_id": TECOM_INTEGRATION_ID,
++        },
++        destination_type="file",
++        destination_config={
++            "format": "xml",
++            "output_dir": profile.get("output_dir", ""),
++        },
++        enabled=profile.get("enabled", True),
++        error_handling={
++            "error_dir": profile.get("error_dir", ""),
++            "archive_dir": profile.get("archive_dir", ""),
++            "on_error": "move_to_error_dir",
++        },
++    )
++
++
++# ---------------------------------------------------------------------------
++# Registration
++# ---------------------------------------------------------------------------
++
++def register():
++    """Register TECOM builtin handlers with the integration framework.
++
++    Called once at startup (from app/builtin/__init__.py).
++    Source and destination use the generic file handlers; only the
++    transform is custom.
++    """
++    register_source("file", read_file_source)
++    register_source("upload", read_file_source)
++    register_destination("file", write_file_destination)
++    register_custom_transform(TECOM_INTEGRATION_ID, _tecom_custom_transform)
++    logger.info("Registered TECOM builtin integration")
+diff --git a/app/config.py b/app/config.py
+index 2124e75..96eaa81 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -76,6 +76,11 @@ DEFAULT_CONFIG = {
+         },
+     ],
+     "country_overrides": {},
++    # User-created integrations (Phase 2+). Each entry is a full integration
++    # config dict as defined in core/integration.py. Builtin profiles (tecom,
++    # ordrsp) are NOT stored here — they are generated on-the-fly from the
++    # profiles list above.
++    "integrations": [],
+     "app_version": "1.2.0",
+     "language": "he",
+ }
+@@ -171,3 +176,76 @@ def resolve_country_code(country_name, cfg):
+         return overrides[key]
+     table = load_country_codes()
+     return table.get(key)
++
++
++# ---------------------------------------------------------------------------
++# Integration CRUD (for user-created integrations, Phase 2+)
++# ---------------------------------------------------------------------------
++
++def get_integrations(cfg):
++    """Return the list of user-created integration configs."""
++    return cfg.get("integrations", [])
++
++
++def get_integration_by_id(cfg, integration_id):
++    """Find a single integration by ID. Returns None if not found."""
++    for integ in cfg.get("integrations", []):
++        if integ.get("id") == integration_id:
++            return integ
++    return None
++
++
++def add_integration(cfg, integration_config):
++    """Add a new user-created integration to the config.
++
++    Validates the config before adding. Returns (success, error_message).
++    """
++    from .core.integration import validate_integration_config
++
++    errors = validate_integration_config(integration_config)
++    if errors:
++        return False, "; ".join(errors)
++
++    # Check for duplicate ID
++    existing = get_integration_by_id(cfg, integration_config["id"])
++    if existing:
++        return False, f"Integration with ID {integration_config['id']!r} already exists"
++
++    cfg.setdefault("integrations", []).append(integration_config)
++    save_config(cfg)
++    return True, ""
++
++
++def update_integration(cfg, integration_id, updates):
++    """Update an existing integration config (partial update).
++
++    Returns (success, error_message).
++    """
++    for i, integ in enumerate(cfg.get("integrations", [])):
++        if integ.get("id") == integration_id:
++            # Merge updates into the existing config
++            _deep_merge(integ, updates)
++            save_config(cfg)
++            return True, ""
++    return False, f"Integration {integration_id!r} not found"
++
++
++def delete_integration(cfg, integration_id):
++    """Remove a user-created integration. Returns (success, error_message)."""
++    integrations = cfg.get("integrations", [])
++    for i, integ in enumerate(integrations):
++        if integ.get("id") == integration_id:
++            integrations.pop(i)
++            save_config(cfg)
++            return True, ""
++    return False, f"Integration {integration_id!r} not found"
++
++
++def toggle_integration(cfg, integration_id, enabled):
++    """Enable or disable an integration. Returns (success, error_message)."""
++    for integ in cfg.get("integrations", []):
++        if integ.get("id") == integration_id:
++            integ["enabled"] = enabled
++            save_config(cfg)
++            return True, ""
++    return False, f"Integration {integration_id!r} not found"
+diff --git a/app/core/__init__.py b/app/core/__init__.py
+new file mode 100644
+index 0000000..acdae52
+--- /dev/null
++++ b/app/core/__init__.py
+@@ -0,0 +1 @@
++# app/core — Generic integration engine (Phase 1: MotoGateway v2)
+diff --git a/app/core/dest_manager.py b/app/core/dest_manager.py
+new file mode 100644
+index 0000000..b050bc0
+--- /dev/null
++++ b/app/core/dest_manager.py
+@@ -0,0 +1,194 @@
++"""
++Destination manager — writes transformed data to various output types.
++
++Phase 1 supports:
++  - "file": write to a local file in XML, JSON, or CSV format
++
++Each destination handler receives (data, output_dir, output_name, dest_config)
++and returns the Path of the written file.
++"""
++import csv
++import json
++import logging
++from datetime import datetime
++from pathlib import Path
++from typing import Any
++
++logger = logging.getLogger("motorad.core.dest_manager")
++
++
++class DestinationError(ValueError):
++    """Raised when output cannot be written."""
++    pass
++
++
++# ---------------------------------------------------------------------------
++# Output format writers
++# ---------------------------------------------------------------------------
++
++def _write_json(data: Any, output_path: Path, config: dict):
++    """Write data as JSON."""
++    indent = config.get("indent", 2)
++    ensure_ascii = config.get("ensure_ascii", False)
++    with open(output_path, "w", encoding="utf-8") as f:
++        json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii)
++
++
++def _write_xml(data: Any, output_path: Path, config: dict):
++    """Write data as XML.
++
++    If data is bytes (already-built XML, e.g. from a custom transform),
++    write directly. If data is a dict, convert to XML.
++    """
++    if isinstance(data, bytes):
++        with open(output_path, "wb") as f:
++            f.write(data)
++        return
++
++    # Dict → XML conversion
++    try:
++        from lxml import etree
++    except ImportError:
++        raise DestinationError("lxml is required for XML output")
++
++    root_tag = config.get("root_element", "root")
++    root = _dict_to_xml(data, root_tag)
++
++    xml_bytes = etree.tostring(
++        root,
++        pretty_print=True,
++        xml_declaration=True,
++        encoding="UTF-8",
++    )
++    with open(output_path, "wb") as f:
++        f.write(xml_bytes)
++
++
++def _dict_to_xml(data: Any, tag: str):
++    """Recursively convert a dict to lxml elements."""
++    from lxml import etree
++
++    element = etree.Element(tag)
++
++    if isinstance(data, dict):
++        for key, value in data.items():
++            if key.startswith("@"):
++                # Attribute
++                element.set(key[1:], str(value))
++            elif key == "#text":
++                element.text = str(value)
++            elif isinstance(value, list):
++                for item in value:
++                    child = _dict_to_xml(item, key)
++                    element.append(child)
++            elif isinstance(value, dict):
++                child = _dict_to_xml(value, key)
++                element.append(child)
++            else:
++                child = etree.SubElement(element, key)
++                child.text = str(value) if value is not None else ""
++    elif isinstance(data, list):
++        for item in data:
++            child = _dict_to_xml(item, "item")
++            element.append(child)
++    else:
++        element.text = str(data) if data is not None else ""
++
++    return element
++
++
++def _write_csv(data: Any, output_path: Path, config: dict):
++    """Write data as CSV.
++
++    Expects data to be a list of dicts (rows) or a dict with an array field.
++    """
++    delimiter = config.get("delimiter", ",")
++    encoding = config.get("encoding", "utf-8")
++
++    # If data is a dict, find the first list field to use as rows
++    rows = data
++    if isinstance(data, dict):
++        for key, value in data.items():
++            if isinstance(value, list) and value and isinstance(value[0], dict):
++                rows = value
++                break
++        else:
++            # Single-record: wrap in list
++            rows = [data]
++
++    if not isinstance(rows, list) or not rows:
++        raise DestinationError("No tabular data to write as CSV")
++
++    # Flatten nested dicts for CSV (dot notation keys)
++    flat_rows = [_flatten_dict(row) for row in rows]
++    fieldnames = list(flat_rows[0].keys())
++
++    with open(output_path, "w", encoding=encoding, newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=delimiter)
++        writer.writeheader()
++        writer.writerows(flat_rows)
++
++
++def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
++    """Flatten a nested dict into dot-notation keys."""
++    items = []
++    for k, v in d.items():
++        new_key = f"{parent_key}{sep}{k}" if parent_key else k
++        if isinstance(v, dict):
++            items.extend(_flatten_dict(v, new_key, sep).items())
++        elif isinstance(v, list):
++            items.append((new_key, json.dumps(v, ensure_ascii=False)))
++        else:
++            items.append((new_key, v))
++    return dict(items)
++
++
++# ---------------------------------------------------------------------------
++# Format registry
++# ---------------------------------------------------------------------------
++
++FORMAT_WRITERS = {
++    "json": _write_json,
++    "xml": _write_xml,
++    "csv": _write_csv,
++}
++
++
++# ---------------------------------------------------------------------------
++# Destination handler (registered with integration.py)
++# ---------------------------------------------------------------------------
++
++def _unique_path(directory: str, filename: str) -> Path:
++    """Return a unique output path, appending a timestamp if needed."""
++    dest = Path(directory) / filename
++    if not dest.exists():
++        return dest
++    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
++    stem, suffix = Path(filename).stem, Path(filename).suffix
++    return Path(directory) / f"{stem}_{stamp}{suffix}"
++
++
++def write_file_destination(data: Any, output_dir: str, output_name: str,
++                           dest_config: dict) -> Path:
++    """Write transformed data to a file.
++
++    dest_config may contain:
++      - format: output format ("xml", "json", "csv")
++      - encoding: file encoding
++      - root_element: root XML element name (for XML output)
++      - indent: JSON indentation
++      - delimiter: CSV delimiter
++    """
++    out_dir = Path(dest_config.get("output_dir", output_dir))
++    out_dir.mkdir(parents=True, exist_ok=True)
++
++    fmt = dest_config.get("format", "json")
++    writer = FORMAT_WRITERS.get(fmt)
++    if writer is None:
++        raise DestinationError(f"Unsupported output format: {fmt}")
++
++    output_path = _unique_path(str(out_dir), output_name)
++
++    logger.info("Writing output %s (format: %s)", output_path.name, fmt)
++    writer(data, output_path, dest_config)
++    return output_path
+diff --git a/app/core/integration.py b/app/core/integration.py
+new file mode 100644
+index 0000000..dcc2737
+--- /dev/null
++++ b/app/core/integration.py
+@@ -0,0 +1,272 @@
++"""
++Core Integration model and runner.
++
++An Integration is a declarative JSON config that defines a complete data
++pipeline: source → transform → destination. The IntegrationRunner reads
++this config and orchestrates the flow.
++
++Builtin integrations (TECOM, OrdRsp) use a "custom" transform type that
++delegates to their existing Python builder functions, preserving full
++backward compatibility. New user-created integrations use the declarative
++"mapping" transform type handled by transform.py.
++
++This module has no knowledge of the web UI, folder watching, or any
++specific data format. It is called by engine.py (which remains the
++entry point for watcher.py and tests).
++"""
++import json
++import logging
++import uuid
++from copy import deepcopy
++from datetime import datetime
++from pathlib import Path
++from typing import Any, Callable, Dict, List, Optional
++
++logger = logging.getLogger("motorad.core.integration")
++
++
++# ---------------------------------------------------------------------------
++# Integration Config schema
++# ---------------------------------------------------------------------------
++
++INTEGRATION_SCHEMA_VERSION = 1
++
++# Valid source/destination/transform types (extensible per phase)
++SOURCE_TYPES = {"file", "upload"}               # Phase 1
++DESTINATION_TYPES = {"file"}                    # Phase 1
++TRANSFORM_TYPES = {"mapping", "custom"}         # "custom" = builtin code path
++
++
++def new_integration_id() -> str:
++    """Generate a short, human-friendly integration ID."""
++    return f"int-{uuid.uuid4().hex[:8]}"
++
++
++def make_integration_config(
++    name: str,
++    source_type: str,
++    source_config: dict,
++    transform_config: dict,
++    destination_type: str,
++    destination_config: dict,
++    *,
++    integration_id: Optional[str] = None,
++    enabled: bool = True,
++    error_handling: Optional[dict] = None,
++) -> dict:
++    """Create a validated integration config dict.
++
++    This is the canonical shape described in ARCHITECTURE.md §4. Every
++    integration — builtin or user-created — is stored in this format.
++    """
++    if source_type not in SOURCE_TYPES:
++        raise ValueError(f"Unknown source type: {source_type!r}")
++    if destination_type not in DESTINATION_TYPES:
++        raise ValueError(f"Unknown destination type: {destination_type!r}")
++
++    transform_type = transform_config.get("type", "mapping")
++    if transform_type not in TRANSFORM_TYPES:
++        raise ValueError(f"Unknown transform type: {transform_type!r}")
++
++    return {
++        "schema_version": INTEGRATION_SCHEMA_VERSION,
++        "id": integration_id or new_integration_id(),
++        "name": name,
++        "enabled": enabled,
++        "created_at": datetime.now().isoformat(timespec="seconds"),
++
++        "source": {
++            "type": source_type,
++            "config": source_config,
++        },
++
++        "transform": transform_config,
++
++        "destination": {
++            "type": destination_type,
++            "config": destination_config,
++        },
++
++        "error_handling": error_handling or {
++            "error_dir": "",
++            "archive_dir": "",
++            "on_error": "move_to_error_dir",
++        },
++    }
++
++
++def validate_integration_config(config: dict) -> List[str]:
++    """Return a list of validation error strings (empty = valid)."""
++    errors = []
++
++    for key in ("id", "name", "source", "transform", "destination"):
++        if key not in config:
++            errors.append(f"Missing required key: {key}")
++
++    if "source" in config:
++        src = config["source"]
++        if src.get("type") not in SOURCE_TYPES:
++            errors.append(f"Invalid source type: {src.get('type')}")
++
++    if "destination" in config:
++        dst = config["destination"]
++        if dst.get("type") not in DESTINATION_TYPES:
++            errors.append(f"Invalid destination type: {dst.get('type')}")
++
++    if "transform" in config:
++        tx = config["transform"]
++        tx_type = tx.get("type", "mapping")
++        if tx_type not in TRANSFORM_TYPES:
++            errors.append(f"Invalid transform type: {tx_type}")
++        if tx_type == "mapping" and not tx.get("field_mappings"):
++            errors.append("Transform type 'mapping' requires 'field_mappings'")
++
++    return errors
++
++
++# ---------------------------------------------------------------------------
++# Processing result (shared between builtin and generic paths)
++# ---------------------------------------------------------------------------
++
++class ProcessingResult:
++    """Outcome of processing one unit of data through an integration.
++
++    Kept identical to the legacy engine.ProcessingResult so callers
++    (watcher, tests, web UI) don't need to change.
++    """
++    def __init__(self, ok: bool, primary_id=None, secondary_id=None,
++                 output_path=None, message=""):
++        self.ok = ok
++        # Generic names; for TECOM these map to invoice_number / customer_name
++        self.invoice_number = primary_id
++        self.customer_name = secondary_id
++        self.output_path = output_path
++        self.message = message
++
++
++# ---------------------------------------------------------------------------
++# Source / Destination registry
++# ---------------------------------------------------------------------------
++
++# Each entry is a callable: fn(source_config, integration_config) -> data
++_source_registry: Dict[str, Callable] = {}
++_destination_registry: Dict[str, Callable] = {}
++
++
++def register_source(source_type: str, handler: Callable):
++    _source_registry[source_type] = handler
++
++
++def register_destination(dest_type: str, handler: Callable):
++    _destination_registry[dest_type] = handler
++
++
++def get_source_handler(source_type: str) -> Optional[Callable]:
++    return _source_registry.get(source_type)
++
++
++def get_destination_handler(dest_type: str) -> Optional[Callable]:
++    return _destination_registry.get(dest_type)
++
++
++# ---------------------------------------------------------------------------
++# Custom transform registry (for builtin integrations)
++# ---------------------------------------------------------------------------
++
++# Maps integration_id -> callable(key, rows, cfg) -> bytes
++_custom_transforms: Dict[str, Callable] = {}
++
++
++def register_custom_transform(integration_id: str, handler: Callable):
++    """Register a Python function as the transform for a builtin integration.
++
++    The handler signature must match the existing builder pattern:
++        handler(key: str, rows: list[dict], cfg: dict) -> bytes
++    """
++    _custom_transforms[integration_id] = handler
++
++
++def get_custom_transform(integration_id: str) -> Optional[Callable]:
++    return _custom_transforms.get(integration_id)
++
++
++# ---------------------------------------------------------------------------
++# Integration Runner
++# ---------------------------------------------------------------------------
++
++class IntegrationRunner:
++    """Executes one integration config against a single input.
++
++    For Phase 1, this handles:
++    - file source (read rows from a file)
++    - custom transform (delegate to builtin Python code) OR
++      mapping transform (declarative field mappings from transform.py)
++    - file destination (write output to a file)
++
++    The runner does NOT handle folder watching, archiving, or error routing —
++    that stays in engine.py so existing behavior is preserved exactly.
++    """
++
++    def __init__(self, integration_config: dict, app_config: dict):
++        self.config = integration_config
++        self.app_config = app_config
++
++    @property
++    def integration_id(self) -> str:
++        return self.config["id"]
++
++    @property
++    def source_type(self) -> str:
++        return self.config["source"]["type"]
++
++    @property
++    def destination_type(self) -> str:
++        return self.config["destination"]["type"]
++
++    @property
++    def transform_type(self) -> str:
++        return self.config["transform"].get("type", "mapping")
++
++    def read_source(self, source_path: Path) -> Any:
++        """Read data from source. Returns format-dependent data structure.
++
++        For file sources this returns a list of dicts (rows).
++        """
++        handler = get_source_handler(self.source_type)
++        if handler is None:
++            raise ValueError(f"No handler registered for source type: {self.source_type}")
++        return handler(source_path, self.config["source"]["config"])
++
++    def transform(self, data: Any, source_path: Path = None) -> Any:
++        """Apply transform to data. Returns transformed output.
++
++        For 'custom' type: delegates to registered Python function.
++        For 'mapping' type: applies declarative field mappings.
++        """
++        if self.transform_type == "custom":
++            handler = get_custom_transform(self.integration_id)
++            if handler is None:
++                raise ValueError(
++                    f"No custom transform registered for integration: {self.integration_id}"
++                )
++            # Custom transforms get the raw data + app config (same signature
++            # as the existing build_invoice_xml / build_ordrsp_xml)
++            return handler(data, self.app_config)
++
++        elif self.transform_type == "mapping":
++            from .transform import apply_mappings
++            return apply_mappings(data, self.config["transform"], self.app_config)
++
++        else:
++            raise ValueError(f"Unknown transform type: {self.transform_type}")
++
++    def write_destination(self, output_data: Any, output_dir: str,
++                          output_name: str) -> Path:
++        """Write transformed data to destination. Returns output path."""
++        handler = get_destination_handler(self.destination_type)
++        if handler is None:
++            raise ValueError(
++                f"No handler registered for destination type: {self.destination_type}"
++            )
++        return handler(output_data, output_dir, output_name,
++                       self.config["destination"]["config"])
+diff --git a/app/core/source_manager.py b/app/core/source_manager.py
+new file mode 100644
+index 0000000..988827f
+--- /dev/null
++++ b/app/core/source_manager.py
+@@ -0,0 +1,192 @@
++"""
++Source manager — reads data from various source types.
++
++Phase 1 supports:
++  - "file": read rows from CSV/TSV/JSON/XML files
++  - "upload": same as file, but path comes from a manual upload
++
++Each source handler receives (source_path, source_config) and returns
++a data structure suitable for the transform engine:
++  - Tabular files (CSV/TSV/XLS) → list of dicts (one per row)
++  - JSON files → parsed JSON (dict or list)
++  - XML files → parsed dict representation
++"""
++import csv
++import json
++import logging
++from pathlib import Path
++from typing import Any
++
++logger = logging.getLogger("motorad.core.source_manager")
++
++
++class SourceError(ValueError):
++    """Raised when a source file cannot be read or parsed."""
++    pass
++
++
++# ---------------------------------------------------------------------------
++# File format readers
++# ---------------------------------------------------------------------------
++
++def _read_csv(path: Path, delimiter: str = ",", encoding: str = "utf-8-sig") -> list:
++    """Read a CSV/TSV file and return a list of dicts."""
++    try:
++        with open(path, "r", encoding=encoding, errors="replace", newline="") as f:
++            reader = csv.reader(f, delimiter=delimiter)
++            rows = list(reader)
++    except Exception as exc:
++        raise SourceError(f"Failed to read file {path.name}: {exc}")
++
++    if not rows:
++        raise SourceError(f"File is empty: {path.name}")
++
++    header = [h.strip() for h in rows[0]]
++    data_rows = rows[1:]
++
++    if not data_rows:
++        raise SourceError(f"File has a header but no data rows: {path.name}")
++
++    result = []
++    for i, raw in enumerate(data_rows, start=2):
++        row = {}
++        for idx, col in enumerate(header):
++            row[col] = raw[idx].strip() if idx < len(raw) else ""
++        result.append(row)
++
++    return result
++
++
++def _read_json(path: Path, encoding: str = "utf-8") -> Any:
++    """Read a JSON file and return parsed data."""
++    try:
++        with open(path, "r", encoding=encoding) as f:
++            return json.load(f)
++    except json.JSONDecodeError as exc:
++        raise SourceError(f"Invalid JSON in {path.name}: {exc}")
++    except Exception as exc:
++        raise SourceError(f"Failed to read file {path.name}: {exc}")
++
++
++def _read_xml(path: Path, encoding: str = "utf-8") -> dict:
++    """Read an XML file and convert to a dict representation.
++
++    Uses a simple recursive conversion: each element becomes a dict with
++    its children as keys. Repeated children become lists. Attributes are
++    stored under @attr keys. Text content is stored under #text.
++    """
++    try:
++        from lxml import etree
++    except ImportError:
++        raise SourceError("lxml is required for XML source files")
++
++    try:
++        tree = etree.parse(str(path))
++        root = tree.getroot()
++        return _xml_element_to_dict(root)
++    except etree.XMLSyntaxError as exc:
++        raise SourceError(f"Invalid XML in {path.name}: {exc}")
++    except Exception as exc:
++        raise SourceError(f"Failed to read file {path.name}: {exc}")
++
++
++def _xml_element_to_dict(element) -> dict:
++    """Recursively convert an lxml element to a dict."""
++    # Strip namespace from tag
++    tag = element.tag
++    if "}" in tag:
++        tag = tag.split("}", 1)[1]
++
++    result = {}
++
++    # Attributes
++    for attr_name, attr_value in element.attrib.items():
++        result[f"@{attr_name}"] = attr_value
++
++    # Children
++    children = list(element)
++    if children:
++        child_dict = {}
++        for child in children:
++            child_data = _xml_element_to_dict(child)
++            child_tag = child.tag
++            if "}" in child_tag:
++                child_tag = child_tag.split("}", 1)[1]
++
++            if child_tag in child_dict:
++                # Convert to list if multiple children with same tag
++                existing = child_dict[child_tag]
++                if not isinstance(existing, list):
++                    child_dict[child_tag] = [existing]
++                child_dict[child_tag].append(child_data[child_tag])
++            else:
++                child_dict.update(child_data)
++
++        result[tag] = child_dict
++    else:
++        # Leaf element: text content
++        text = (element.text or "").strip()
++        if result:  # has attributes
++            result["#text"] = text
++            result = {tag: result}
++        else:
++            result = {tag: text}
++
++    return result
++
++
++# ---------------------------------------------------------------------------
++# Format detection
++# ---------------------------------------------------------------------------
++
++# Map of format identifiers → reader functions
++FORMAT_READERS = {
++    "csv": lambda p, cfg: _read_csv(p, delimiter=",",
++                                     encoding=cfg.get("encoding", "utf-8-sig")),
++    "tsv": lambda p, cfg: _read_csv(p, delimiter="\t",
++                                     encoding=cfg.get("encoding", "utf-8-sig")),
++    "xls_tab_delimited": lambda p, cfg: _read_csv(p, delimiter="\t",
++                                                    encoding=cfg.get("encoding", "utf-8-sig")),
++    "json": lambda p, cfg: _read_json(p, encoding=cfg.get("encoding", "utf-8")),
++    "xml": lambda p, cfg: _read_xml(p, encoding=cfg.get("encoding", "utf-8")),
++}
++
++
++def _detect_format(path: Path) -> str:
++    """Auto-detect file format from extension."""
++    ext = path.suffix.lower()
++    mapping = {
++        ".csv": "csv",
++        ".tsv": "tsv",
++        ".xls": "xls_tab_delimited",  # Priority exports XLS as tab-delimited
++        ".xlsx": "xls_tab_delimited",
++        ".json": "json",
++        ".xml": "xml",
++        ".txt": "tsv",
++    }
++    return mapping.get(ext, "csv")
++
++
++# ---------------------------------------------------------------------------
++# Source handler (registered with integration.py)
++# ---------------------------------------------------------------------------
++
++def read_file_source(source_path: Path, source_config: dict) -> Any:
++    """Read data from a file source.
++
++    source_config may contain:
++      - format: explicit format ("csv", "tsv", "json", "xml", "xls_tab_delimited")
++      - encoding: file encoding (default: utf-8-sig)
++      - delimiter: custom delimiter for CSV (default: depends on format)
++    """
++    path = Path(source_path)
++    if not path.exists():
++        raise SourceError(f"Source file not found: {path}")
++
++    fmt = source_config.get("format") or _detect_format(path)
++    reader = FORMAT_READERS.get(fmt)
++    if reader is None:
++        raise SourceError(f"Unsupported file format: {fmt}")
++
++    logger.info("Reading source file %s (format: %s)", path.name, fmt)
++    return reader(path, source_config)
+diff --git a/app/core/transform.py b/app/core/transform.py
+new file mode 100644
+index 0000000..08951b2
+--- /dev/null
++++ b/app/core/transform.py
+@@ -0,0 +1,406 @@
++"""
++Declarative transform engine.
++
++Reads a JSON transform config (field_mappings, lookup_tables, constants,
++conditions) and applies it to input data to produce output data.
++
++This is the heart of user-created integrations: instead of writing Python
++code, the user defines mappings in JSON (assisted by AI in Phase 3) and
++this engine executes them.
++
++For Phase 1, supports:
++  - Direct field mapping (source_path → target_path)
++  - Format conversions (dates, numbers)
++  - Lookup tables (e.g. country codes)
++  - Default/constant values
++  - Simple conditions (if source field empty, use fallback)
++  - Array/line-item iteration (source[].field → target[].field)
++
++The transform config shape matches ARCHITECTURE.md §3.2:
++{
++    "type": "mapping",
++    "field_mappings": [
++        {"source_path": "...", "target_path": "...", "transform": null},
++        {"source_path": "...", "target_path": "...", "transform": "date_format(...)"},
++    ],
++    "lookup_tables": {"table_name": {"KEY": "VALUE", ...}},
++    "constants": {"target_path": "fixed_value"},
++    "defaults": {"target_path": "fallback_value"}
++}
++"""
++import logging
++import re
++from copy import deepcopy
++from datetime import datetime
++from decimal import Decimal, ROUND_HALF_UP
++from typing import Any, Dict, List, Optional
++
++logger = logging.getLogger("motorad.core.transform")
++
++
++class TransformError(ValueError):
++    """Raised when a mapping rule cannot be applied."""
++    pass
++
++
++# ---------------------------------------------------------------------------
++# Path utilities — navigate nested dicts/lists with dot notation
++# ---------------------------------------------------------------------------
++
++def _get_by_path(data: Any, path: str) -> Any:
++    """Retrieve a value from nested data using dot-path notation.
++
++    Supports:
++      "header.invoice_number"       → data["header"]["invoice_number"]
++      "lines[].unit_price"          → [row["unit_price"] for row in data["lines"]]
++      "lines[0].unit_price"         → data["lines"][0]["unit_price"]
++
++    Returns None for missing paths instead of raising.
++    """
++    if not path:
++        return data
++
++    parts = _parse_path(path)
++    return _resolve_parts(data, parts)
++
++
++def _parse_path(path: str) -> list:
++    """Split a dot-path into navigation segments.
++
++    "header.lines[].unit_price" → ["header", "lines", "[]", "unit_price"]
++    "header.lines[0].name"     → ["header", "lines", "[0]", "name"]
++    """
++    segments = []
++    for part in path.split("."):
++        # Handle array notation: "lines[]" or "lines[0]"
++        m = re.match(r"^(\w+)(\[(\d*)\])$", part)
++        if m:
++            segments.append(m.group(1))
++            idx = m.group(3)
++            segments.append(f"[{idx}]" if idx else "[]")
++        else:
++            segments.append(part)
++    return segments
++
++
++def _resolve_parts(data: Any, parts: list) -> Any:
++    """Walk the data structure following parsed path segments."""
++    current = data
++    i = 0
++    while i < len(parts):
++        part = parts[i]
++
++        if part == "[]":
++            # Iterate: apply remaining path to each element
++            if not isinstance(current, list):
++                return None
++            remaining = parts[i + 1:]
++            if not remaining:
++                return current
++            return [_resolve_parts(item, remaining) for item in current]
++
++        elif part.startswith("[") and part.endswith("]"):
++            # Indexed access
++            idx = int(part[1:-1])
++            if not isinstance(current, list) or idx >= len(current):
++                return None
++            current = current[idx]
++
++        else:
++            # Dict key access
++            if isinstance(current, dict):
++                current = current.get(part)
++            elif isinstance(current, list):
++                # If we hit a list without [], map over it
++                return [_resolve_parts(item, parts[i:]) for item in current]
++            else:
++                return None
++
++            if current is None:
++                return None
++
++        i += 1
++
++    return current
++
++
++def _set_by_path(data: dict, path: str, value: Any):
++    """Set a value in a nested dict, creating intermediate dicts/lists as needed.
++
++    "header.invoice_number" sets data["header"]["invoice_number"] = value
++    """
++    parts = path.split(".")
++    current = data
++    for i, part in enumerate(parts[:-1]):
++        # Handle array notation in target path
++        m = re.match(r"^(\w+)\[(\d*)\]$", part)
++        if m:
++            key, idx_str = m.group(1), m.group(2)
++            if key not in current:
++                current[key] = []
++            lst = current[key]
++            if idx_str:
++                idx = int(idx_str)
++                while len(lst) <= idx:
++                    lst.append({})
++                current = lst[idx]
++            else:
++                # Will be handled at the row level
++                current = current.setdefault(key, {})
++        else:
++            if part not in current or not isinstance(current[part], dict):
++                current[part] = {}
++            current = current[part]
++
++    # Set the leaf
++    leaf = parts[-1]
++    m = re.match(r"^(\w+)\[(\d*)\]$", leaf)
++    if m:
++        key = m.group(1)
++        current[key] = value
++    else:
++        current[leaf] = value
++
++
++# ---------------------------------------------------------------------------
++# Transform functions — applied per-field
++# ---------------------------------------------------------------------------
++
++# date_format('DD/MM/YYYY', 'YYYY-MM-DD')
++_DATE_FORMAT_RE = re.compile(
++    r"date_format\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)"
++)
++
++# lookup('table_name')
++_LOOKUP_RE = re.compile(r"lookup\(\s*'(\w+)'\s*\)")
++
++# Python date format mapping from common user-friendly tokens
++_DATE_TOKENS = {
++    "YYYY": "%Y", "YY": "%y",
++    "MM": "%m", "DD": "%d",
++    "HH": "%H", "mm": "%M", "ss": "%S",
++}
++
++
++def _convert_date_format(token_format: str) -> str:
++    """Convert user-friendly date format to Python strftime/strptime format."""
++    result = token_format
++    # Sort by length descending so YYYY is replaced before YY
++    for token, fmt in sorted(_DATE_TOKENS.items(), key=lambda x: -len(x[0])):
++        result = result.replace(token, fmt)
++    return result
++
++
++def apply_field_transform(value: Any, transform_expr: str,
++                          lookup_tables: dict) -> Any:
++    """Apply a single transform expression to a value.
++
++    Supported transforms:
++      null / empty         → pass through
++      "date_format(...)"   → reformat date
++      "lookup('table')"    → lookup in table
++      "upper"              → uppercase
++      "lower"              → lowercase
++      "trim"               → strip whitespace
++      "to_decimal"         → convert to 2-decimal string
++      "calculate"          → (reserved for Phase 3 expressions)
++    """
++    if not transform_expr:
++        return value
++
++    transform_expr = transform_expr.strip()
++
++    # date_format('input_fmt', 'output_fmt')
++    m = _DATE_FORMAT_RE.match(transform_expr)
++    if m:
++        in_fmt = _convert_date_format(m.group(1))
++        out_fmt = _convert_date_format(m.group(2))
++        try:
++            dt = datetime.strptime(str(value), in_fmt)
++            return dt.strftime(out_fmt)
++        except (ValueError, TypeError) as exc:
++            raise TransformError(f"Date conversion failed for {value!r}: {exc}")
++
++    # lookup('table_name')
++    m = _LOOKUP_RE.match(transform_expr)
++    if m:
++        table_name = m.group(1)
++        table = lookup_tables.get(table_name, {})
++        key = str(value).strip().upper()
++        result = table.get(key)
++        if result is None:
++            raise TransformError(
++                f"Lookup failed: {value!r} not found in table '{table_name}'"
++            )
++        return result
++
++    # Simple transforms
++    if transform_expr == "upper":
++        return str(value).upper() if value else value
++    if transform_expr == "lower":
++        return str(value).lower() if value else value
++    if transform_expr == "trim":
++        return str(value).strip() if value else value
++    if transform_expr == "to_decimal":
++        try:
++            return str(Decimal(str(value)).quantize(
++                Decimal("0.01"), rounding=ROUND_HALF_UP
++            ))
++        except Exception as exc:
++            raise TransformError(f"Decimal conversion failed for {value!r}: {exc}")
++
++    raise TransformError(f"Unknown transform expression: {transform_expr!r}")
++
++
++# ---------------------------------------------------------------------------
++# Main entry point
++# ---------------------------------------------------------------------------
++
++def apply_mappings(data: Any, transform_config: dict,
++                   app_config: dict) -> dict:
++    """Apply a full declarative transform config to input data.
++
++    Args:
++        data: Input data (list of dicts for tabular, or nested dict)
++        transform_config: The "transform" section of an integration config
++        app_config: The global app config (for lookup tables etc.)
++
++    Returns:
++        A dict representing the transformed output, structured according
++        to the target_path definitions in the field mappings.
++    """
++    field_mappings = transform_config.get("field_mappings", [])
++    lookup_tables = transform_config.get("lookup_tables", {})
++    constants = transform_config.get("constants", {})
++    defaults = transform_config.get("defaults", {})
++
++    output = {}
++
++    # 1. Apply constants first (they don't depend on source data)
++    for target_path, value in constants.items():
++        _set_by_path(output, target_path, value)
++
++    # 2. Determine if we're dealing with row-based (tabular) or nested data
++    if isinstance(data, list):
++        # Tabular: data is a list of row-dicts
++        # Separate header-level and line-level mappings
++        header_mappings = []
++        line_mappings = []
++
++        for mapping in field_mappings:
++            src = mapping.get("source_path", "")
++            tgt = mapping.get("target_path", "")
++            if "[]" in src or "[]" in tgt:
++                line_mappings.append(mapping)
++            else:
++                header_mappings.append(mapping)
++
++        # Apply header mappings from first row
++        if data:
++            first_row = data[0]
++            for mapping in header_mappings:
++                _apply_one_mapping(first_row, output, mapping,
++                                   lookup_tables, defaults)
++
++        # Apply line mappings across all rows
++        if line_mappings and data:
++            _apply_line_mappings(data, output, line_mappings,
++                                lookup_tables, defaults)
++
++    elif isinstance(data, dict):
++        # Nested dict: navigate by path
++        for mapping in field_mappings:
++            _apply_one_mapping(data, output, mapping, lookup_tables, defaults)
++
++    else:
++        raise TransformError(f"Unsupported input data type: {type(data)}")
++
++    # 3. Apply defaults (only where output value is still missing/None)
++    for target_path, default_value in defaults.items():
++        existing = _get_by_path(output, target_path)
++        if existing is None:
++            _set_by_path(output, target_path, default_value)
++
++    return output
++
++
++def _apply_one_mapping(source_data: dict, output: dict, mapping: dict,
++                       lookup_tables: dict, defaults: dict):
++    """Apply a single field mapping from source to output."""
++    source_path = mapping.get("source_path", "")
++    target_path = mapping.get("target_path", "")
++    transform_expr = mapping.get("transform")
++
++    if not source_path or not target_path:
++        return
++
++    value = _get_by_path(source_data, source_path)
++
++    # Apply default if value is missing
++    if value is None or (isinstance(value, str) and not value.strip()):
++        default = defaults.get(target_path)
++        if default is not None:
++            value = default
++        elif mapping.get("required", False):
++            raise TransformError(
++                f"Required field missing: {source_path}"
++            )
++        else:
++            return  # Skip optional empty fields
++
++    # Apply transform
++    if transform_expr:
++        value = apply_field_transform(value, transform_expr, lookup_tables)
++
++    _set_by_path(output, target_path, value)
++
++
++def _apply_line_mappings(rows: list, output: dict, line_mappings: list,
++                         lookup_tables: dict, defaults: dict):
++    """Apply line-level (array) mappings across all data rows.
++
++    For each row, creates an output line item by applying each line mapping.
++    The target array path is derived from the first "[]" in target_path.
++    """
++    if not line_mappings:
++        return
++
++    # Determine the target array path (e.g. "lines" from "lines[].field")
++    first_target = line_mappings[0].get("target_path", "")
++    array_match = re.match(r"^([\w.]+)\[\]\.(.+)$", first_target)
++    if not array_match:
++        return
++    array_path = array_match.group(1)
++
++    output_lines = []
++    for row in rows:
++        line_output = {}
++        for mapping in line_mappings:
++            src = mapping.get("source_path", "")
++            tgt = mapping.get("target_path", "")
++            transform_expr = mapping.get("transform")
++
++            # Strip array notation from paths for per-row processing
++            src_field = re.sub(r"^[\w.]+\[\]\.", "", src)
++            tgt_field = re.sub(r"^[\w.]+\[\]\.", "", tgt)
++
++            value = _get_by_path(row, src_field)
++
++            if value is None or (isinstance(value, str) and not value.strip()):
++                default = defaults.get(tgt)
++                if default is not None:
++                    value = default
++                elif mapping.get("required", False):
++                    raise TransformError(f"Required field missing in line: {src_field}")
++                else:
++                    continue
++
++            if transform_expr:
++                value = apply_field_transform(value, transform_expr, lookup_tables)
++
++            _set_by_path(line_output, tgt_field, value)
++
++        if line_output:
++            output_lines.append(line_output)
++
++    _set_by_path(output, array_path, output_lines)
+diff --git a/app/destinations/__init__.py b/app/destinations/__init__.py
+new file mode 100644
+index 0000000..84dc27d
+--- /dev/null
++++ b/app/destinations/__init__.py
+@@ -0,0 +1 @@
++# app/destinations — Destination connectors (file, api, ftp)
+diff --git a/app/engine.py b/app/engine.py
+index 52824be..4f4c42f 100644
+--- a/app/engine.py
++++ b/app/engine.py
+@@ -4,6 +4,15 @@ archive, or -> errors on any failure. This module has no knowledge of
+ folder-watching or the web UI; it is called by watcher.py (production) and
+ directly by tests/test_conversion.py (offline verification).
+ 
++Phase 1 refactoring:
++  The existing FORMAT_HANDLERS path is preserved exactly for builtin
++  converters (tecom, ordrsp). A new process_integration() path handles
++  user-created integrations via the IntegrationRunner (Phase 2+).
++
++  At startup, builtin integrations are registered with the core framework
++  so that IntegrationRunner *can* run them — but the existing process_file()
++  still uses FORMAT_HANDLERS directly for zero-risk backward compatibility.
++
+ Dispatches by profile["converter"] to an entry in FORMAT_HANDLERS. Each
+ format (TECOM invoice/TXML, OrdRsp order-response, and anything added
+ later) plugs in its own reader module, grouping function, and XML builder
+@@ -36,6 +45,21 @@ logger = logging.getLogger("motorad.engine")
+ 
+ db.init_db()  # safe no-op if already initialized; ensures the log table always exists
+ 
++# ---------------------------------------------------------------------------
++# Register builtin integrations with the core framework
++# ---------------------------------------------------------------------------
++
++try:
++    from .builtin import register_all as _register_builtins
++    _register_builtins()
++except Exception:
++    logger.debug("Builtin integration registration deferred (missing deps?)",
++                 exc_info=True)
++
++# ---------------------------------------------------------------------------
++# Legacy FORMAT_HANDLERS — kept intact for builtin converters
++# ---------------------------------------------------------------------------
++
+ FORMAT_HANDLERS = {
+     "tecom": {
+         "read_rows": xls_reader.read_rows,
+@@ -86,6 +110,10 @@ def _unique_destination(directory, filename):
+     return Path(directory) / f"{stem}_{stamp}{suffix}"
+ 
+ 
++# ---------------------------------------------------------------------------
++# Builtin processing (legacy path — unchanged behavior)
++# ---------------------------------------------------------------------------
++
+ def process_file(source_path, profile, cfg):
+     """Processes a single source file for the given profile config dict.
+     Returns a ProcessingResult. Never raises - all failures are caught,
+@@ -167,3 +195,110 @@ def process_file(source_path, profile, cfg):
+     )
+     logger.error("Failed to convert %s: %s", source_path.name, message)
+     return ProcessingResult(False, invoice_number, customer_name, None, message)
++
++
++# ---------------------------------------------------------------------------
++# Integration-based processing (for user-created integrations, Phase 2+)
++# ---------------------------------------------------------------------------
++
++def process_integration(source_path, integration_config, app_config):
++    """Process a file through a user-created integration config.
++
++    Uses the IntegrationRunner from core/integration.py. This is the new
++    code path for integrations created via the wizard UI (Phase 4).
++    Builtin profiles still go through process_file() above.
++
++    Returns a ProcessingResult (same interface as process_file).
++    """
++    from .core.integration import IntegrationRunner, ProcessingResult as CoreResult
++
++    source_path = Path(source_path)
++    error_handling = integration_config.get("error_handling", {})
++
++    # Ensure output and error dirs exist
++    dest_cfg = integration_config.get("destination", {}).get("config", {})
++    output_dir = dest_cfg.get("output_dir", "")
++    error_dir = error_handling.get("error_dir", "")
++    archive_dir = error_handling.get("archive_dir", "")
++
++    for d in (output_dir, error_dir, archive_dir):
++        if d:
++            Path(d).mkdir(parents=True, exist_ok=True)
++
++    try:
++        runner = IntegrationRunner(integration_config, app_config)
++
++        # 1. Read source
++        data = runner.read_source(source_path)
++
++        # 2. Transform
++        output_data = runner.transform(data, source_path)
++
++        # 3. Write destination
++        output_name = f"{source_path.stem}.out{_get_output_extension(dest_cfg)}"
++        output_path = runner.write_destination(output_data, output_dir, output_name)
++
++        # 4. Archive source
++        if archive_dir:
++            archive_dest = _unique_destination(archive_dir, source_path.name)
++            shutil.move(str(source_path), str(archive_dest))
++        else:
++            archive_dest = source_path
++
++        # 5. Log success
++        db.log_event(
++            timestamp=datetime.now().isoformat(timespec="seconds"),
++            profile_id=integration_config.get("id"),
++            invoice_number=None,
++            customer_name=None,
++            status="success",
++            source_file=str(archive_dest),
++            output_file=str(output_path),
++            message="OK",
++        )
++        logger.info("Integration %s: %s -> %s",
++                     integration_config.get("name"),
++                     source_path.name, output_path.name)
++        return ProcessingResult(True, None, None, output_path, "OK")
++
++    except (ValueError, Exception) as exc:
++        if isinstance(exc, ValueError):
++            message = str(exc)
++        else:
++            message = "Unexpected error:\n" + traceback.format_exc()
++
++        # Route to error dir
++        try:
++            if error_dir:
++                error_dest = _unique_destination(error_dir, source_path.name)
++                shutil.move(str(source_path), str(error_dest))
++                sidecar = error_dest.with_suffix(error_dest.suffix + ".error.txt")
++                with open(sidecar, "w", encoding="utf-8") as f:
++                    f.write(message)
++            else:
++                error_dest = source_path
++        except Exception:
++            logger.exception("Failed to move failed file %s to error folder",
++                             source_path)
++            error_dest = source_path
++
++        db.log_event(
++            timestamp=datetime.now().isoformat(timespec="seconds"),
++            profile_id=integration_config.get("id"),
++            invoice_number=None,
++            customer_name=None,
++            status="error",
++            source_file=str(error_dest),
++            output_file=None,
++            message=message,
++        )
++        logger.error("Integration %s failed for %s: %s",
++                      integration_config.get("name"),
++                      source_path.name, message)
++        return ProcessingResult(False, None, None, None, message)
++
++
++def _get_output_extension(dest_config):
++    """Get file extension for the configured output format."""
++    fmt = dest_config.get("format", "json")
++    return {"json": ".json", "xml": ".xml", "csv": ".csv"}.get(fmt, ".out")
+diff --git a/app/sources/__init__.py b/app/sources/__init__.py
+new file mode 100644
+index 0000000..832d6a8
+--- /dev/null
++++ b/app/sources/__init__.py
+@@ -0,0 +1 @@
++# app/sources — Source connectors (file, webhook, api, ftp)
+diff --git a/app/watcher.py b/app/watcher.py
+index 424b1d9..8d01d04 100644
+--- a/app/watcher.py
++++ b/app/watcher.py
+@@ -6,6 +6,11 @@ the service was down, or events watchdog might miss on some network drives).
+ 
+ Waits for a file's size to stabilize before processing, so a file still
+ being copied/written by another process isn't read half-finished.
++
++Phase 1 extension:
++  Also watches user-created integrations (from config["integrations"]).
++  Each enabled integration with a source input_dir gets its own handler
++  that routes files through engine.process_integration().
+ """
+ import logging
+ import threading
+@@ -46,6 +51,8 @@ def _wait_until_stable(path: Path, timeout=60):
+ 
+ 
+ class ProfileHandler(FileSystemEventHandler):
++    """Handles files for builtin profiles (tecom, ordrsp)."""
++
+     def __init__(self, profile, get_config, seen_lock, in_progress):
+         self.profile = profile
+         self.get_config = get_config
+@@ -82,10 +89,59 @@ class ProfileHandler(FileSystemEventHandler):
+                 self.in_progress.discard(str(path))
+ 
+ 
++class IntegrationHandler(FileSystemEventHandler):
++    """Handles files for user-created integrations (Phase 2+).
++
++    Same stability/dedup logic as ProfileHandler, but routes through
++    engine.process_integration() instead of process_file().
++    """
++
++    # File extensions accepted by integrations (broader than builtin profiles)
++    ACCEPTED_EXTENSIONS = {
++        ".xls", ".xlsx", ".csv", ".tsv", ".txt",
++        ".json", ".xml",
++    }
++
++    def __init__(self, integration_config, get_config, seen_lock, in_progress):
++        self.integration_config = integration_config
++        self.get_config = get_config
++        self.seen_lock = seen_lock
++        self.in_progress = in_progress
++
++    def on_created(self, event):
++        if event.is_directory:
++            return
++        self._handle(Path(event.src_path))
++
++    def on_moved(self, event):
++        if event.is_directory:
++            return
++        self._handle(Path(event.dest_path))
++
++    def _handle(self, path: Path):
++        if path.suffix.lower() not in self.ACCEPTED_EXTENSIONS:
++            return
++        with self.seen_lock:
++            if str(path) in self.in_progress:
++                return
++            self.in_progress.add(str(path))
++        try:
++            if not _wait_until_stable(path):
++                logger.warning("File %s never stabilized, skipping this pass", path)
++                return
++            if not path.exists():
++                return
++            cfg = self.get_config()
++            engine.process_integration(path, self.integration_config, cfg)
++        finally:
++            with self.seen_lock:
++                self.in_progress.discard(str(path))
++
++
+ class WatcherManager:
+-    """Owns one watchdog Observer + periodic scanner per enabled profile.
+-    Call reload() whenever profiles change in the settings UI to restart
+-    watching with the new folder paths.
++    """Owns one watchdog Observer + periodic scanner per enabled profile
++    and integration. Call reload() whenever profiles/integrations change
++    in the settings UI to restart watching with the new folder paths.
+     """
+ 
+     def __init__(self, get_config):
+@@ -115,6 +171,8 @@ class WatcherManager:
+         self._observer = Observer()
+         self._handlers = {}
+         cfg = self.get_config()
++
++        # --- Builtin profiles (existing behavior) ---
+         for profile in cfg.get("profiles", []):
+             if not profile.get("enabled", True):
+                 continue
+@@ -123,17 +181,42 @@ class WatcherManager:
+                 continue
+             Path(input_dir).mkdir(parents=True, exist_ok=True)
+             handler = ProfileHandler(profile, self.get_config, self._seen_lock, self._in_progress)
+-            self._handlers[profile["id"]] = (handler, profile)
++            self._handlers[profile["id"]] = (handler, profile, "profile")
+             self._observer.schedule(handler, input_dir, recursive=False)
+             logger.info("Watching %s for profile '%s'", input_dir, profile["id"])
++
++        # --- User-created integrations (Phase 2+) ---
++        for integration in cfg.get("integrations", []):
++            if not integration.get("enabled", True):
++                continue
++            source_cfg = integration.get("source", {}).get("config", {})
++            input_dir = source_cfg.get("input_dir")
++            if not input_dir:
++                continue
++            Path(input_dir).mkdir(parents=True, exist_ok=True)
++            handler = IntegrationHandler(
++                integration, self.get_config,
++                self._seen_lock, self._in_progress
++            )
++            integ_id = integration.get("id", "unknown")
++            self._handlers[integ_id] = (handler, integration, "integration")
++            self._observer.schedule(handler, input_dir, recursive=False)
++            logger.info("Watching %s for integration '%s'",
++                        input_dir, integration.get("name", integ_id))
++
+         self._observer.start()
+ 
+     def _scan_loop(self):
+         while not self._stop_event.wait(SCAN_INTERVAL_SECONDS):
+             try:
+-                for handler, profile in list(self._handlers.values()):
+-                    input_dir = Path(profile.get("input_dir", ""))
+-                    if not input_dir.exists():
++                for handler, config_data, handler_type in list(self._handlers.values()):
++                    if handler_type == "profile":
++                        input_dir = Path(config_data.get("input_dir", ""))
++                    else:
++                        # Integration: input_dir is in source.config
++                        source_cfg = config_data.get("source", {}).get("config", {})
++                        input_dir = Path(source_cfg.get("input_dir", ""))
++                    if not input_dir or not input_dir.exists():
+                         continue
+                     for path in input_dir.iterdir():
+                         if path.is_file():
+diff --git a/tests/test_integration_framework.py b/tests/test_integration_framework.py
+new file mode 100644
+index 0000000..6c42883
+--- /dev/null
++++ b/tests/test_integration_framework.py
+@@ -0,0 +1,598 @@
++"""
++Tests for the Phase 1 integration framework.
++
++Covers:
++  1. Core integration model (config creation, validation)
++  2. Transform engine (field mappings, lookups, transforms)
++  3. Source manager (CSV/JSON reading, format detection)
++  4. Destination manager (JSON/XML/CSV writing)
++  5. Builtin registration (TECOM + OrdRsp custom transforms)
++  6. Backward compatibility (engine.process_file unchanged behavior)
++
++Run with: python -m pytest tests/test_integration_framework.py -v
++"""
++import csv
++import json
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++
++# Set config dir to temp so tests don't touch real config
++_test_config_dir = tempfile.mkdtemp(prefix="motorad_test_")
++os.environ["MOTORAD_CONFIG_DIR"] = _test_config_dir
++
++
++# ---------------------------------------------------------------------------
++# 1. Core integration model
++# ---------------------------------------------------------------------------
++
++class TestIntegrationModel:
++    """Tests for core/integration.py config creation and validation."""
++
++    def test_make_integration_config_valid(self):
++        from app.core.integration import make_integration_config
++        config = make_integration_config(
++            name="Test Integration",
++            source_type="file",
++            source_config={"format": "csv"},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [
++                    {"source_path": "name", "target_path": "Name"},
++                ],
++            },
++            destination_type="file",
++            destination_config={"format": "json"},
++        )
++        assert config["name"] == "Test Integration"
++        assert config["source"]["type"] == "file"
++        assert config["destination"]["type"] == "file"
++        assert config["transform"]["type"] == "mapping"
++        assert config["id"].startswith("int-")
++
++    def test_make_integration_config_invalid_source(self):
++        from app.core.integration import make_integration_config
++        with pytest.raises(ValueError, match="Unknown source type"):
++            make_integration_config(
++                name="Bad",
++                source_type="ftp",
++                source_config={},
++                transform_config={"type": "mapping", "field_mappings": []},
++                destination_type="file",
++                destination_config={},
++            )
++
++    def test_validate_integration_config_missing_keys(self):
++        from app.core.integration import validate_integration_config
++        errors = validate_integration_config({})
++        assert len(errors) >= 4  # missing id, name, source, transform, destination
++
++    def test_validate_integration_config_valid(self):
++        from app.core.integration import make_integration_config, validate_integration_config
++        config = make_integration_config(
++            name="Valid",
++            source_type="file",
++            source_config={},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [{"source_path": "a", "target_path": "b"}],
++            },
++            destination_type="file",
++            destination_config={},
++        )
++        errors = validate_integration_config(config)
++        assert errors == []
++
++    def test_validate_mapping_requires_field_mappings(self):
++        from app.core.integration import validate_integration_config
++        config = {
++            "id": "test",
++            "name": "Test",
++            "source": {"type": "file", "config": {}},
++            "transform": {"type": "mapping"},  # no field_mappings
++            "destination": {"type": "file", "config": {}},
++        }
++        errors = validate_integration_config(config)
++        assert any("field_mappings" in e for e in errors)
++
++    def test_new_integration_id_uniqueness(self):
++        from app.core.integration import new_integration_id
++        ids = {new_integration_id() for _ in range(100)}
++        assert len(ids) == 100  # all unique
++
++
++# ---------------------------------------------------------------------------
++# 2. Transform engine
++# ---------------------------------------------------------------------------
++
++class TestTransformEngine:
++    """Tests for core/transform.py."""
++
++    def test_simple_field_mapping(self):
++        from app.core.transform import apply_mappings
++
++        data = {"first_name": "David", "last_name": "Raz"}
++        config = {
++            "type": "mapping",
++            "field_mappings": [
++                {"source_path": "first_name", "target_path": "name.first"},
++                {"source_path": "last_name", "target_path": "name.last"},
++            ],
++        }
++        result = apply_mappings(data, config, {})
++        assert result == {"name": {"first": "David", "last": "Raz"}}
++
++    def test_constants(self):
++        from app.core.transform import apply_mappings
++
++        config = {
++            "type": "mapping",
++            "field_mappings": [],
++            "constants": {"header.version": "1.0", "header.type": "invoice"},
++        }
++        result = apply_mappings({}, config, {})
++        assert result["header"]["version"] == "1.0"
++        assert result["header"]["type"] == "invoice"
++
++    def test_defaults_applied_when_missing(self):
++        from app.core.transform import apply_mappings
++
++        data = {"name": "Test"}
++        config = {
++            "type": "mapping",
++            "field_mappings": [
++                {"source_path": "name", "target_path": "name"},
++                {"source_path": "country", "target_path": "country"},
++            ],
++            "defaults": {"country": "IL"},
++        }
++        result = apply_mappings(data, config, {})
++        assert result["name"] == "Test"
++        assert result["country"] == "IL"
++
++    def test_date_format_transform(self):
++        from app.core.transform import apply_field_transform
++
++        result = apply_field_transform(
++            "25/12/2026", "date_format('DD/MM/YYYY', 'YYYY-MM-DD')", {}
++        )
++        assert result == "2026-12-25"
++
++    def test_lookup_transform(self):
++        from app.core.transform import apply_field_transform
++
++        tables = {"countries": {"IL": "Israel", "US": "United States"}}
++        result = apply_field_transform("IL", "lookup('countries')", tables)
++        assert result == "Israel"
++
++    def test_lookup_not_found_raises(self):
++        from app.core.transform import apply_field_transform, TransformError
++
++        tables = {"countries": {"IL": "Israel"}}
++        with pytest.raises(TransformError, match="not found"):
++            apply_field_transform("XX", "lookup('countries')", tables)
++
++    def test_upper_transform(self):
++        from app.core.transform import apply_field_transform
++        assert apply_field_transform("hello", "upper", {}) == "HELLO"
++
++    def test_lower_transform(self):
++        from app.core.transform import apply_field_transform
++        assert apply_field_transform("HELLO", "lower", {}) == "hello"
++
++    def test_trim_transform(self):
++        from app.core.transform import apply_field_transform
++        assert apply_field_transform("  hello  ", "trim", {}) == "hello"
++
++    def test_to_decimal_transform(self):
++        from app.core.transform import apply_field_transform
++        assert apply_field_transform("10.5", "to_decimal", {}) == "10.50"
++        assert apply_field_transform("3.14159", "to_decimal", {}) == "3.14"
++
++    def test_tabular_data_with_line_mappings(self):
++        from app.core.transform import apply_mappings
++
++        data = [
++            {"item": "Widget", "qty": "10", "price": "5.00"},
++            {"item": "Gadget", "qty": "3", "price": "12.50"},
++        ]
++        config = {
++            "type": "mapping",
++            "field_mappings": [
++                {"source_path": "lines[].item", "target_path": "lines[].name"},
++                {"source_path": "lines[].qty", "target_path": "lines[].quantity"},
++                {"source_path": "lines[].price", "target_path": "lines[].unit_price"},
++            ],
++        }
++        result = apply_mappings(data, config, {})
++        assert len(result["lines"]) == 2
++        assert result["lines"][0]["name"] == "Widget"
++        assert result["lines"][1]["quantity"] == "3"
++
++    def test_path_navigation_nested(self):
++        from app.core.transform import _get_by_path
++
++        data = {"a": {"b": {"c": 42}}}
++        assert _get_by_path(data, "a.b.c") == 42
++
++    def test_path_navigation_missing(self):
++        from app.core.transform import _get_by_path
++
++        data = {"a": {"b": 1}}
++        assert _get_by_path(data, "a.c.d") is None
++
++    def test_unknown_transform_raises(self):
++        from app.core.transform import apply_field_transform, TransformError
++
++        with pytest.raises(TransformError, match="Unknown transform"):
++            apply_field_transform("val", "nonexistent_fn()", {})
++
++
++# ---------------------------------------------------------------------------
++# 3. Source manager
++# ---------------------------------------------------------------------------
++
++class TestSourceManager:
++    """Tests for core/source_manager.py."""
++
++    def test_read_csv(self, tmp_path):
++        from app.core.source_manager import read_file_source
++
++        csv_file = tmp_path / "test.csv"
++        csv_file.write_text("name,age\nAlice,30\nBob,25\n", encoding="utf-8")
++
++        result = read_file_source(csv_file, {})
++        assert len(result) == 2
++        assert result[0]["name"] == "Alice"
++        assert result[1]["age"] == "25"
++
++    def test_read_json(self, tmp_path):
++        from app.core.source_manager import read_file_source
++
++        json_file = tmp_path / "test.json"
++        json_file.write_text('{"items": [1, 2, 3]}', encoding="utf-8")
++
++        result = read_file_source(json_file, {"format": "json"})
++        assert result == {"items": [1, 2, 3]}
++
++    def test_read_tsv(self, tmp_path):
++        from app.core.source_manager import read_file_source
++
++        tsv_file = tmp_path / "test.tsv"
++        tsv_file.write_text("col1\tcol2\nval1\tval2\n", encoding="utf-8")
++
++        result = read_file_source(tsv_file, {})
++        assert len(result) == 1
++        assert result[0]["col1"] == "val1"
++
++    def test_format_detection(self):
++        from app.core.source_manager import _detect_format
++
++        assert _detect_format(Path("data.csv")) == "csv"
++        assert _detect_format(Path("data.json")) == "json"
++        assert _detect_format(Path("data.xml")) == "xml"
++        assert _detect_format(Path("data.xls")) == "xls_tab_delimited"
++        assert _detect_format(Path("data.tsv")) == "tsv"
++
++    def test_missing_file_raises(self, tmp_path):
++        from app.core.source_manager import read_file_source, SourceError
++
++        with pytest.raises(SourceError, match="not found"):
++            read_file_source(tmp_path / "nonexistent.csv", {})
++
++    def test_empty_csv_raises(self, tmp_path):
++        from app.core.source_manager import read_file_source, SourceError
++
++        empty_file = tmp_path / "empty.csv"
++        empty_file.write_text("", encoding="utf-8")
++
++        with pytest.raises(SourceError, match="empty"):
++            read_file_source(empty_file, {})
++
++
++# ---------------------------------------------------------------------------
++# 4. Destination manager
++# ---------------------------------------------------------------------------
++
++class TestDestinationManager:
++    """Tests for core/dest_manager.py."""
++
++    def test_write_json(self, tmp_path):
++        from app.core.dest_manager import write_file_destination
++
++        data = {"name": "Test", "value": 42}
++        path = write_file_destination(
++            data, str(tmp_path), "out.json",
++            {"format": "json"}
++        )
++        assert path.exists()
++        loaded = json.loads(path.read_text(encoding="utf-8"))
++        assert loaded["name"] == "Test"
++
++    def test_write_csv(self, tmp_path):
++        from app.core.dest_manager import write_file_destination
++
++        data = [
++            {"name": "Alice", "age": 30},
++            {"name": "Bob", "age": 25},
++        ]
++        path = write_file_destination(
++            data, str(tmp_path), "out.csv",
++            {"format": "csv"}
++        )
++        assert path.exists()
++        with open(path, "r", encoding="utf-8") as f:
++            reader = csv.DictReader(f)
++            rows = list(reader)
++        assert len(rows) == 2
++        assert rows[0]["name"] == "Alice"
++
++    def test_write_xml_from_bytes(self, tmp_path):
++        from app.core.dest_manager import write_file_destination
++
++        xml_bytes = b'<?xml version="1.0"?>\n<root><item>hello</item></root>'
++        path = write_file_destination(
++            xml_bytes, str(tmp_path), "out.xml",
++            {"format": "xml"}
++        )
++        assert path.exists()
++        content = path.read_bytes()
++        assert b"<item>hello</item>" in content
++
++    def test_write_xml_from_dict(self, tmp_path):
++        from app.core.dest_manager import write_file_destination
++
++        data = {"name": "Test", "value": "42"}
++        path = write_file_destination(
++            data, str(tmp_path), "out.xml",
++            {"format": "xml", "root_element": "record"}
++        )
++        assert path.exists()
++        content = path.read_text(encoding="utf-8")
++        assert "<record>" in content
++        assert "<name>Test</name>" in content
++
++    def test_unique_path_no_collision(self, tmp_path):
++        from app.core.dest_manager import _unique_path
++
++        path = _unique_path(str(tmp_path), "test.json")
++        assert path.name == "test.json"
++
++    def test_unique_path_with_collision(self, tmp_path):
++        from app.core.dest_manager import _unique_path
++
++        (tmp_path / "test.json").write_text("{}")
++        path = _unique_path(str(tmp_path), "test.json")
++        assert path.name != "test.json"
++        assert path.name.startswith("test_")
++
++    def test_unsupported_format_raises(self, tmp_path):
++        from app.core.dest_manager import write_file_destination, DestinationError
++
++        with pytest.raises(DestinationError, match="Unsupported"):
++            write_file_destination({}, str(tmp_path), "out.xyz", {"format": "xyz"})
++
++
++# ---------------------------------------------------------------------------
++# 5. Builtin registration
++# ---------------------------------------------------------------------------
++
++class TestBuiltinRegistration:
++    """Tests for builtin integration registration."""
++
++    def test_builtins_registered(self):
++        from app.core.integration import (
++            get_source_handler,
++            get_destination_handler,
++            get_custom_transform,
++        )
++        # engine.py imports trigger registration
++        import app.engine  # noqa
++
++        assert get_source_handler("file") is not None
++        assert get_source_handler("upload") is not None
++        assert get_destination_handler("file") is not None
++        assert get_custom_transform("builtin-tecom") is not None
++        assert get_custom_transform("builtin-ordrsp") is not None
++
++    def test_tecom_config_factory(self):
++        from app.builtin.tecom_integration import make_tecom_config
++
++        profile = {
++            "id": "tecom",
++            "display_name": "TECOM Test",
++            "output_dir": "/tmp/out",
++            "error_dir": "/tmp/err",
++            "archive_dir": "/tmp/arch",
++            "enabled": True,
++        }
++        config = make_tecom_config(profile, {})
++        assert config["id"] == "builtin-tecom"
++        assert config["name"] == "TECOM Test"
++        assert config["source"]["type"] == "file"
++        assert config["transform"]["type"] == "custom"
++        assert config["destination"]["type"] == "file"
++
++    def test_ordrsp_config_factory(self):
++        from app.builtin.ordrsp_integration import make_ordrsp_config
++
++        profile = {
++            "id": "ordrsp",
++            "display_name": "OrdRsp Test",
++            "output_dir": "/tmp/out",
++            "error_dir": "/tmp/err",
++            "archive_dir": "/tmp/arch",
++        }
++        config = make_ordrsp_config(profile, {})
++        assert config["id"] == "builtin-ordrsp"
++        assert config["transform"]["type"] == "custom"
++
++
++# ---------------------------------------------------------------------------
++# 6. Integration config CRUD (config.py)
++# ---------------------------------------------------------------------------
++
++class TestConfigIntegrations:
++    """Tests for integration CRUD in config.py."""
++
++    def test_add_and_get_integration(self):
++        from app.core.integration import make_integration_config
++        from app import config as config_module
++
++        cfg = config_module.load_config()
++        integ = make_integration_config(
++            name="Test CRUD",
++            source_type="file",
++            source_config={},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [{"source_path": "a", "target_path": "b"}],
++            },
++            destination_type="file",
++            destination_config={},
++        )
++        ok, err = config_module.add_integration(cfg, integ)
++        assert ok, err
++
++        found = config_module.get_integration_by_id(cfg, integ["id"])
++        assert found is not None
++        assert found["name"] == "Test CRUD"
++
++        # Cleanup
++        config_module.delete_integration(cfg, integ["id"])
++
++    def test_duplicate_id_rejected(self):
++        from app.core.integration import make_integration_config
++        from app import config as config_module
++
++        cfg = config_module.load_config()
++        integ = make_integration_config(
++            name="Dup Test",
++            integration_id="dup-test-123",
++            source_type="file",
++            source_config={},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [{"source_path": "a", "target_path": "b"}],
++            },
++            destination_type="file",
++            destination_config={},
++        )
++        config_module.add_integration(cfg, integ)
++
++        ok, err = config_module.add_integration(cfg, integ)
++        assert not ok
++        assert "already exists" in err
++
++        config_module.delete_integration(cfg, "dup-test-123")
++
++    def test_toggle_integration(self):
++        from app.core.integration import make_integration_config
++        from app import config as config_module
++
++        cfg = config_module.load_config()
++        integ = make_integration_config(
++            name="Toggle Test",
++            source_type="file",
++            source_config={},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [{"source_path": "a", "target_path": "b"}],
++            },
++            destination_type="file",
++            destination_config={},
++            enabled=True,
++        )
++        config_module.add_integration(cfg, integ)
++
++        ok, _ = config_module.toggle_integration(cfg, integ["id"], False)
++        assert ok
++        found = config_module.get_integration_by_id(cfg, integ["id"])
++        assert found["enabled"] is False
++
++        config_module.delete_integration(cfg, integ["id"])
++
++
++# ---------------------------------------------------------------------------
++# 7. End-to-end: declarative mapping integration
++# ---------------------------------------------------------------------------
++
++class TestEndToEndMapping:
++    """End-to-end test: CSV file → declarative mapping → JSON output."""
++
++    def test_csv_to_json_mapping(self, tmp_path):
++        from app.core.integration import IntegrationRunner, make_integration_config
++        from app.builtin import register_all
++
++        # Ensure handlers are registered
++        try:
++            register_all()
++        except Exception:
++            pass
++
++        # Create test CSV
++        csv_file = tmp_path / "input.csv"
++        csv_file.write_text(
++            "first_name,last_name,country\n"
++            "David,Raz,IL\n"
++            "John,Doe,US\n",
++            encoding="utf-8"
++        )
++
++        config = make_integration_config(
++            name="CSV to JSON test",
++            source_type="file",
++            source_config={"format": "csv"},
++            transform_config={
++                "type": "mapping",
++                "field_mappings": [
++                    {"source_path": "lines[].first_name", "target_path": "people[].name"},
++                    {"source_path": "lines[].country", "target_path": "people[].country",
++                     "transform": "lookup('countries')"},
++                ],
++                "lookup_tables": {
++                    "countries": {"IL": "Israel", "US": "United States"},
++                },
++                "constants": {
++                    "header.format": "contacts",
++                    "header.version": "1.0",
++                },
++            },
++            destination_type="file",
++            destination_config={"format": "json", "output_dir": str(tmp_path / "out")},
++        )
++
++        runner = IntegrationRunner(config, {})
++
++        # Read
++        data = runner.read_source(csv_file)
++        assert len(data) == 2
++
++        # Transform
++        output = runner.transform(data)
++        assert output["header"]["format"] == "contacts"
++        assert len(output["people"]) == 2
++        assert output["people"][0]["country"] == "Israel"
++
++        # Write
++        out_path = runner.write_destination(output, str(tmp_path / "out"), "contacts.json")
++        assert out_path.exists()
++        result = json.loads(out_path.read_text(encoding="utf-8"))
++        assert result["people"][1]["country"] == "United States"
++
++
++# ---------------------------------------------------------------------------
++# Cleanup
++# ---------------------------------------------------------------------------
++
++@pytest.fixture(autouse=True, scope="session")
++def cleanup_test_config():
++    yield
++    shutil.rmtree(_test_config_dir, ignore_errors=True)
+-- 
+2.43.0
+
