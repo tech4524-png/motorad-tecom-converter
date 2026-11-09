@@ -20,11 +20,15 @@ from . import i18n
 logger = logging.getLogger("motorad.webapp")
 
 
-def create_app(watcher_manager=None):
+def create_app(watcher_manager=None, api_poll_manager=None):
     app = Flask(__name__)
     cfg = config_module.load_config()
     app.secret_key = cfg["secret_key"]
     db.init_db()
+
+    # Register webhook blueprint (Phase 2)
+    from .webhook_routes import webhook_bp
+    app.register_blueprint(webhook_bp)
 
     def get_config():
         return config_module.load_config()
@@ -197,6 +201,232 @@ def create_app(watcher_manager=None):
 
         base_table = config_module.load_country_codes()
         return render_template("countries.html", cfg=cfg, base_table=base_table)
+
+    # ------------------------------------------------------------------ #
+    # Integrations (Phase 2: webhooks, API polling, API destinations)
+    # ------------------------------------------------------------------ #
+    @app.route("/integrations", methods=["GET", "POST"])
+    @login_required
+    def integrations_view():
+        cfg = get_config()
+        t = _translator()
+
+        if request.method == "POST":
+            action = request.form.get("action", "")
+            integ_id = request.form.get("integration_id", "")
+
+            # ---- ADD WEBHOOK ----
+            if action == "add_webhook":
+                from .core.webhook import generate_webhook_path, generate_webhook_secret
+                import secrets as _secrets
+
+                name = request.form.get("name", "").strip()
+                output_dir = request.form.get("output_dir", "").strip()
+                output_format = request.form.get("output_format", "json")
+                new_id = f"webhook_{_secrets.token_hex(4)}"
+
+                new_integ = {
+                    "id": new_id,
+                    "name": name or new_id,
+                    "enabled": True,
+                    "source": {
+                        "type": "webhook",
+                        "config": {
+                            "webhook_path": generate_webhook_path(),
+                            "webhook_secret": generate_webhook_secret(),
+                            "content_types": ["application/json"],
+                            "require_signature": False,
+                        },
+                    },
+                    "transform": {"type": "passthrough"},
+                    "destination": {
+                        "type": "file",
+                        "config": {
+                            "output_dir": output_dir,
+                            "format": output_format,
+                        },
+                    },
+                    "error_handling": {"error_dir": ""},
+                }
+                ok, err = config_module.add_integration(cfg, new_integ)
+                if ok:
+                    flash(t("integrations_saved"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view", tab="webhooks"))
+
+            # ---- UPDATE WEBHOOK ----
+            elif action == "update_webhook":
+                updates = {
+                    "name": request.form.get("name", "").strip(),
+                    "enabled": request.form.get("enabled") == "on",
+                    "source": {
+                        "config": {
+                            "webhook_secret": request.form.get("webhook_secret", ""),
+                            "require_signature": request.form.get("require_signature") == "on",
+                        },
+                    },
+                    "destination": {
+                        "config": {
+                            "output_dir": request.form.get("output_dir", "").strip(),
+                            "format": request.form.get("output_format", "json"),
+                        },
+                    },
+                    "error_handling": {
+                        "error_dir": request.form.get("error_dir", "").strip(),
+                    },
+                }
+                ok, err = config_module.update_integration(cfg, integ_id, updates)
+                if ok:
+                    flash(t("integrations_saved"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view", tab="webhooks"))
+
+            # ---- ADD API POLL ----
+            elif action == "add_api_poll":
+                from .core.api_poll import make_api_poll_source_config
+                import secrets as _secrets
+
+                name = request.form.get("name", "").strip()
+                url = request.form.get("url", "").strip()
+                interval = int(request.form.get("poll_interval_seconds", 300))
+                output_dir = request.form.get("output_dir", "").strip()
+                output_format = request.form.get("output_format", "json")
+                new_id = f"api_poll_{_secrets.token_hex(4)}"
+
+                new_integ = {
+                    "id": new_id,
+                    "name": name or new_id,
+                    "enabled": True,
+                    "source": {
+                        "type": "api_poll",
+                        "config": make_api_poll_source_config(
+                            url=url,
+                            poll_interval_seconds=interval,
+                        ),
+                    },
+                    "transform": {"type": "passthrough"},
+                    "destination": {
+                        "type": "file",
+                        "config": {
+                            "output_dir": output_dir,
+                            "format": output_format,
+                        },
+                    },
+                    "error_handling": {"error_dir": ""},
+                }
+                ok, err = config_module.add_integration(cfg, new_integ)
+                if ok:
+                    if api_poll_manager:
+                        api_poll_manager.reload()
+                    flash(t("integrations_saved"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view", tab="api_poll"))
+
+            # ---- UPDATE API POLL ----
+            elif action == "update_api_poll":
+                updates = {
+                    "name": request.form.get("name", "").strip(),
+                    "enabled": request.form.get("enabled") == "on",
+                    "source": {
+                        "config": {
+                            "url": request.form.get("url", "").strip(),
+                            "method": request.form.get("method", "GET"),
+                            "poll_interval_seconds": max(30, int(request.form.get("poll_interval_seconds", 300))),
+                            "auth": {"type": request.form.get("auth_type", "none")},
+                            "response_format": request.form.get("response_format", "json"),
+                            "data_path": request.form.get("data_path", "").strip(),
+                        },
+                    },
+                    "destination": {
+                        "config": {
+                            "output_dir": request.form.get("output_dir", "").strip(),
+                            "format": request.form.get("output_format", "json"),
+                        },
+                    },
+                    "error_handling": {
+                        "error_dir": request.form.get("error_dir", "").strip(),
+                    },
+                }
+                ok, err = config_module.update_integration(cfg, integ_id, updates)
+                if ok:
+                    if api_poll_manager:
+                        api_poll_manager.reload()
+                    flash(t("integrations_saved"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view", tab="api_poll"))
+
+            # ---- UPDATE API DESTINATION ----
+            elif action == "update_api_dest":
+                updates = {
+                    "name": request.form.get("name", "").strip(),
+                    "enabled": request.form.get("enabled") == "on",
+                    "destination": {
+                        "config": {
+                            "url": request.form.get("dest_url", "").strip(),
+                            "method": request.form.get("dest_method", "POST"),
+                            "content_type": request.form.get("dest_content_type", "application/json"),
+                            "auth": {"type": request.form.get("dest_auth_type", "none")},
+                            "timeout_seconds": max(5, int(request.form.get("dest_timeout", 30))),
+                            "retry_count": max(0, int(request.form.get("dest_retries", 2))),
+                            "retry_delay_seconds": max(1, int(request.form.get("dest_retry_delay", 5))),
+                        },
+                    },
+                }
+                ok, err = config_module.update_integration(cfg, integ_id, updates)
+                if ok:
+                    flash(t("integrations_saved"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view", tab="api_dest"))
+
+            # ---- DELETE INTEGRATION ----
+            elif action == "delete_integration":
+                ok, err = config_module.delete_integration(cfg, integ_id)
+                if ok:
+                    if api_poll_manager:
+                        api_poll_manager.reload()
+                    flash(t("integrations_deleted"), "success")
+                else:
+                    flash(err, "error")
+                return redirect(url_for("integrations_view"))
+
+        # ---- GET: render the page ----
+        integrations = config_module.get_integrations(cfg)
+        active_tab = request.args.get("tab", "webhooks")
+
+        # Split integrations by type
+        webhook_integrations = [
+            i for i in integrations if i.get("source", {}).get("type") == "webhook"
+        ]
+        api_poll_integrations = [
+            i for i in integrations if i.get("source", {}).get("type") == "api_poll"
+        ]
+        api_dest_integrations = [
+            i for i in integrations if i.get("destination", {}).get("type") == "api"
+        ]
+
+        # Attach webhook events for display
+        from .core.webhook import get_webhook_events
+        for integ in webhook_integrations:
+            integ["_events"] = get_webhook_events(integ["id"])
+
+        # Get poll statuses
+        poll_statuses = []
+        if api_poll_manager:
+            poll_statuses = api_poll_manager.get_status()
+
+        return render_template(
+            "integrations.html",
+            active_tab=active_tab,
+            webhook_integrations=webhook_integrations,
+            api_poll_integrations=api_poll_integrations,
+            api_dest_integrations=api_dest_integrations,
+            poll_statuses=poll_statuses,
+        )
 
     # ------------------------------------------------------------------ #
     # Updates

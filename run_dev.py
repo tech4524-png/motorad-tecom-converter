@@ -17,6 +17,8 @@ from waitress import serve
 from app import config as config_module
 from app.webapp import create_app
 from app.watcher import WatcherManager
+from app.core.api_poll import ApiPollManager
+from app.engine import process_api_data
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,11 +38,15 @@ def main():
     watcher = WatcherManager(config_module.load_config)
     watcher.start()
 
-    app = create_app(watcher_manager=watcher)
+    api_poller = ApiPollManager(config_module.load_config, process_api_data)
+    api_poller.start()
+
+    app = create_app(watcher_manager=watcher, api_poll_manager=api_poller)
     logging.getLogger("motorad.main").info("Serving on http://%s:%s", args.host, args.port)
     try:
         serve(app, host=args.host, port=args.port)
     finally:
+        api_poller.stop()
         watcher.stop()
 
 

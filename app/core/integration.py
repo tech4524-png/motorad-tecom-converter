@@ -32,9 +32,9 @@ logger = logging.getLogger("motorad.core.integration")
 INTEGRATION_SCHEMA_VERSION = 1
 
 # Valid source/destination/transform types (extensible per phase)
-SOURCE_TYPES = {"file", "upload"}               # Phase 1
-DESTINATION_TYPES = {"file"}                    # Phase 1
-TRANSFORM_TYPES = {"mapping", "custom"}         # "custom" = builtin code path
+SOURCE_TYPES = {"file", "upload", "webhook", "api_poll"}  # Phase 1+2
+DESTINATION_TYPES = {"file", "api"}                       # Phase 1+2
+TRANSFORM_TYPES = {"mapping", "custom", "passthrough"}  # "passthrough" = no transform
 
 
 def new_integration_id() -> str:
@@ -252,6 +252,9 @@ class IntegrationRunner:
             # Custom transforms get the raw data + app config (same signature
             # as the existing build_invoice_xml / build_ordrsp_xml)
             return handler(data, self.app_config)
+
+        elif self.transform_type == "passthrough":
+            return data
 
         elif self.transform_type == "mapping":
             from .transform import apply_mappings

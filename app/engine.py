@@ -302,3 +302,83 @@ def _get_output_extension(dest_config):
     """Get file extension for the configured output format."""
     fmt = dest_config.get("format", "json")
     return {"json": ".json", "xml": ".xml", "csv": ".csv"}.get(fmt, ".out")
+
+
+# ---------------------------------------------------------------------------
+# Webhook / API data processing (Phase 2)
+# ---------------------------------------------------------------------------
+
+def _process_data_integration(data, integration_config, app_config, source_label="webhook"):
+    """Process in-memory data (from webhook or API poll) through an integration.
+
+    Unlike process_integration() which reads from a file, this receives
+    already-parsed data and routes it through transform → destination.
+
+    Returns a ProcessingResult.
+    """
+    from .core.integration import IntegrationRunner
+
+    error_handling = integration_config.get("error_handling", {})
+    dest_cfg = integration_config.get("destination", {}).get("config", {})
+    output_dir = dest_cfg.get("output_dir", "")
+    error_dir = error_handling.get("error_dir", "")
+
+    for d in (output_dir, error_dir):
+        if d:
+            Path(d).mkdir(parents=True, exist_ok=True)
+
+    integ_id = integration_config.get("id", "unknown")
+    integ_name = integration_config.get("name", integ_id)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    try:
+        runner = IntegrationRunner(integration_config, app_config)
+
+        # Transform
+        output_data = runner.transform(data)
+
+        # Write destination
+        output_name = f"{integ_id}_{stamp}{_get_output_extension(dest_cfg)}"
+        output_path = runner.write_destination(output_data, output_dir, output_name)
+
+        db.log_event(
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            profile_id=integ_id,
+            invoice_number=None,
+            customer_name=None,
+            status="success",
+            source_file=f"{source_label}:{integ_id}",
+            output_file=str(output_path),
+            message="OK",
+        )
+        logger.info("Integration %s (%s): data -> %s", integ_name, source_label, output_path.name)
+        return ProcessingResult(True, None, None, output_path, "OK")
+
+    except ValueError as exc:
+        message = str(exc)
+    except Exception:
+        message = "Unexpected error:\n" + traceback.format_exc()
+
+    # Error logging
+    db.log_event(
+        timestamp=datetime.now().isoformat(timespec="seconds"),
+        profile_id=integ_id,
+        invoice_number=None,
+        customer_name=None,
+        status="error",
+        source_file=f"{source_label}:{integ_id}",
+        output_file=None,
+        message=message,
+    )
+    logger.error("Integration %s (%s) failed: %s", integ_name, source_label, message)
+    return ProcessingResult(False, None, None, None, message)
+
+
+def process_webhook_data(data, integration_config, app_config):
+    """Process data received via webhook. Called by webhook_routes.py."""
+    return _process_data_integration(data, integration_config, app_config, "webhook")
+
+
+def process_api_data(data, integration_config, app_config):
+    """Process data received via API poll. Called by ApiPollManager."""
+    return _process_data_integration(data, integration_config, app_config, "api_poll")

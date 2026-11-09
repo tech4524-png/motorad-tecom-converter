@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t('integrations_title') }}</h1>
+<p class="small-note">{{ t('integrations_intro') }}</p>
+
+{# ---- Tab navigation ---- #}
+<div class="tab-bar" style="display:flex; gap:0; margin-bottom:1.5rem; border-bottom:2px solid var(--border);">
+    <a href="?tab=webhooks" class="tab-link {% if active_tab == 'webhooks' %}active{% endif %}"
+       style="padding:0.6rem 1.2rem; text-decoration:none; color:var(--text); border-bottom:2px solid {% if active_tab == 'webhooks' %}var(--motorad-red){% else %}transparent{% endif %}; margin-bottom:-2px; font-weight:{% if active_tab == 'webhooks' %}700{% else %}400{% endif %};">
+       {{ t('integrations_tab_webhooks') }}
+    </a>
+    <a href="?tab=api_poll" class="tab-link {% if active_tab == 'api_poll' %}active{% endif %}"
+       style="padding:0.6rem 1.2rem; text-decoration:none; color:var(--text); border-bottom:2px solid {% if active_tab == 'api_poll' %}var(--motorad-red){% else %}transparent{% endif %}; margin-bottom:-2px; font-weight:{% if active_tab == 'api_poll' %}700{% else %}400{% endif %};">
+       {{ t('integrations_tab_api_poll') }}
+    </a>
+    <a href="?tab=api_dest" class="tab-link {% if active_tab == 'api_dest' %}active{% endif %}"
+       style="padding:0.6rem 1.2rem; text-decoration:none; color:var(--text); border-bottom:2px solid {% if active_tab == 'api_dest' %}var(--motorad-red){% else %}transparent{% endif %}; margin-bottom:-2px; font-weight:{% if active_tab == 'api_dest' %}700{% else %}400{% endif %};">
+       {{ t('integrations_tab_api_dest') }}
+    </a>
+</div>
+
+{# ================================================================ #}
+{# WEBHOOKS TAB                                                      #}
+{# ================================================================ #}
+{% if active_tab == 'webhooks' %}
+
+    {% if webhook_integrations %}
+        {% for integ in webhook_integrations %}
+        <div class="card" style="margin-bottom:1.2rem;">
+            <h2>{{ integ.name or integ.id }}
+                <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:3px;
+                    background:{% if integ.enabled %}var(--success){% else %}var(--muted){% endif %};
+                    color:#fff; margin-inline-start:0.5rem;">
+                    {% if integ.enabled %}{{ t('integrations_enabled') }}{% else %}{{ t('integrations_disabled') }}{% endif %}
+                </span>
+            </h2>
+            <form method="post" action="{{ url_for('integrations_view') }}">
+                <input type="hidden" name="action" value="update_webhook">
+                <input type="hidden" name="integration_id" value="{{ integ.id }}">
+                <div class="grid-2">
+                    <div>
+                        <label>{{ t('webhook_name') }}</label>
+                        <input type="text" name="name" value="{{ integ.name }}">
+                        <label>{{ t('webhook_path') }}</label>
+                        <input type="text" name="webhook_path" value="{{ integ.source.config.webhook_path }}" readonly
+                               style="background:#f0f0f0;">
+                        <label>{{ t('webhook_url') }}</label>
+                        <input type="text" value="{{ request.host_url }}webhook/{{ integ.source.config.webhook_path }}"
+                               readonly style="background:#f0f0f0; font-family:monospace; font-size:0.85rem;"
+                               onclick="this.select()">
+                    </div>
+                    <div>
+                        <label>{{ t('webhook_secret') }}</label>
+                        <input type="text" name="webhook_secret" value="{{ integ.source.config.get('webhook_secret', '') }}"
+                               style="font-family:monospace; font-size:0.85rem;">
+                        <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.8rem;">
+                            <input type="checkbox" name="require_signature"
+                                   {% if integ.source.config.get('require_signature') %}checked{% endif %}
+                                   style="width:auto;">
+                            {{ t('webhook_require_signature') }}
+                        </label>
+                        <br><br>
+                        <label>{{ t('transform_output_dir') }}</label>
+                        <input type="text" name="output_dir"
+                               value="{{ integ.destination.config.get('output_dir', '') }}">
+                        <label>{{ t('transform_output_format') }}</label>
+                        <select name="output_format">
+                            {% for fmt in ['json', 'xml', 'csv'] %}
+                            <option value="{{ fmt }}" {% if integ.destination.config.get('format') == fmt %}selected{% endif %}>{{ fmt|upper }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div style="margin-top:0.8rem;">
+                    <label>{{ t('transform_error_dir') }}</label>
+                    <input type="text" name="error_dir" value="{{ integ.get('error_handling', {}).get('error_dir', '') }}">
+                </div>
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.8rem;">
+                    <input type="checkbox" name="enabled"
+                           {% if integ.enabled %}checked{% endif %} style="width:auto;">
+                    {{ t('integrations_enabled') }}
+                </label>
+                <br>
+                <div style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+                    <button type="submit">{{ t('integrations_save') }}</button>
+                    <button type="submit" name="action" value="delete_integration"
+                            onclick="return confirm('Delete this integration?')"
+                            style="background:var(--error);">{{ t('integrations_delete') }}</button>
+                </div>
+            </form>
+
+            {# Recent webhook events #}
+            {% if integ._events %}
+            <details style="margin-top:1rem;">
+                <summary style="cursor:pointer; font-weight:600;">{{ t('webhook_events_title') }}</summary>
+                <table style="width:100%; margin-top:0.5rem; font-size:0.85rem;">
+                    <thead>
+                        <tr>
+                            <th>{{ t('webhook_col_time') }}</th>
+                            <th>{{ t('webhook_col_status') }}</th>
+                            <th>{{ t('webhook_col_message') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for ev in integ._events[:10] %}
+                        <tr>
+                            <td>{{ ev.timestamp }}</td>
+                            <td><span class="status-{{ ev.status }}">{{ ev.status }}</span></td>
+                            <td>{{ ev.message }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+            {% endif %}
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="color:var(--muted);">{{ t('integrations_no_items') }}</p>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('integrations_view') }}" style="margin-top:1rem;">
+        <input type="hidden" name="action" value="add_webhook">
+        <div class="card">
+            <h3>{{ t('integrations_add') }}: Webhook</h3>
+            <label>{{ t('webhook_name') }}</label>
+            <input type="text" name="name" required placeholder="e.g. SAP Order Feed">
+            <label>{{ t('transform_output_dir') }}</label>
+            <input type="text" name="output_dir" placeholder="C:\Motorad\webhooks\output">
+            <label>{{ t('transform_output_format') }}</label>
+            <select name="output_format">
+                <option value="json">JSON</option>
+                <option value="xml">XML</option>
+                <option value="csv">CSV</option>
+            </select>
+            <br>
+            <button type="submit" style="margin-top:0.6rem;">{{ t('integrations_add') }}</button>
+        </div>
+    </form>
+
+{# ================================================================ #}
+{# API POLLING TAB                                                   #}
+{# ================================================================ #}
+{% elif active_tab == 'api_poll' %}
+
+    {% if api_poll_integrations %}
+        {% for integ in api_poll_integrations %}
+        <div class="card" style="margin-bottom:1.2rem;">
+            <h2>{{ integ.name or integ.id }}
+                <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:3px;
+                    background:{% if integ.enabled %}var(--success){% else %}var(--muted){% endif %};
+                    color:#fff; margin-inline-start:0.5rem;">
+                    {% if integ.enabled %}{{ t('integrations_enabled') }}{% else %}{{ t('integrations_disabled') }}{% endif %}
+                </span>
+                {% for st in poll_statuses if st.integration_id == integ.id %}
+                <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:3px;
+                    background:{% if st.thread_alive %}#1565c0{% else %}var(--warning){% endif %};
+                    color:#fff; margin-inline-start:0.3rem;">
+                    {% if st.thread_alive %}{{ t('api_poll_status_running') }}{% else %}{{ t('api_poll_status_stopped') }}{% endif %}
+                </span>
+                {% if st.last_poll %}
+                <span style="font-size:0.75rem; color:var(--muted); margin-inline-start:0.3rem;">
+                    {{ t('api_poll_last_poll') }}: {{ st.last_poll }}
+                </span>
+                {% endif %}
+                {% endfor %}
+            </h2>
+            <form method="post" action="{{ url_for('integrations_view') }}?tab=api_poll">
+                <input type="hidden" name="action" value="update_api_poll">
+                <input type="hidden" name="integration_id" value="{{ integ.id }}">
+                <div class="grid-2">
+                    <div>
+                        <label>{{ t('api_poll_name') }}</label>
+                        <input type="text" name="name" value="{{ integ.name }}">
+                        <label>{{ t('api_poll_url') }}</label>
+                        <input type="text" name="url" value="{{ integ.source.config.url }}">
+                        <label>{{ t('api_poll_method') }}</label>
+                        <select name="method">
+                            {% for m in ['GET', 'POST'] %}
+                            <option value="{{ m }}" {% if integ.source.config.get('method') == m %}selected{% endif %}>{{ m }}</option>
+                            {% endfor %}
+                        </select>
+                        <label>{{ t('api_poll_interval') }}</label>
+                        <input type="number" name="poll_interval_seconds" min="30"
+                               value="{{ integ.source.config.get('poll_interval_seconds', 300) }}">
+                    </div>
+                    <div>
+                        <label>{{ t('api_poll_auth_type') }}</label>
+                        <select name="auth_type">
+                            <option value="none" {% if integ.source.config.get('auth', {}).get('type') == 'none' %}selected{% endif %}>{{ t('api_poll_auth_none') }}</option>
+                            <option value="bearer" {% if integ.source.config.get('auth', {}).get('type') == 'bearer' %}selected{% endif %}>{{ t('api_poll_auth_bearer') }}</option>
+                            <option value="basic" {% if integ.source.config.get('auth', {}).get('type') == 'basic' %}selected{% endif %}>{{ t('api_poll_auth_basic') }}</option>
+                            <option value="api_key" {% if integ.source.config.get('auth', {}).get('type') == 'api_key' %}selected{% endif %}>{{ t('api_poll_auth_api_key') }}</option>
+                        </select>
+                        <label>{{ t('api_poll_response_format') }}</label>
+                        <select name="response_format">
+                            {% for fmt in ['json', 'xml', 'csv'] %}
+                            <option value="{{ fmt }}" {% if integ.source.config.get('response_format') == fmt %}selected{% endif %}>{{ fmt|upper }}</option>
+                            {% endfor %}
+                        </select>
+                        <label>{{ t('api_poll_data_path') }}</label>
+                        <input type="text" name="data_path" value="{{ integ.source.config.get('data_path', '') }}"
+                               placeholder="data.items">
+                        <label>{{ t('transform_output_dir') }}</label>
+                        <input type="text" name="output_dir"
+                               value="{{ integ.destination.config.get('output_dir', '') }}">
+                        <label>{{ t('transform_output_format') }}</label>
+                        <select name="output_format">
+                            {% for fmt in ['json', 'xml', 'csv'] %}
+                            <option value="{{ fmt }}" {% if integ.destination.config.get('format') == fmt %}selected{% endif %}>{{ fmt|upper }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div style="margin-top:0.8rem;">
+                    <label>{{ t('transform_error_dir') }}</label>
+                    <input type="text" name="error_dir" value="{{ integ.get('error_handling', {}).get('error_dir', '') }}">
+                </div>
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.8rem;">
+                    <input type="checkbox" name="enabled"
+                           {% if integ.enabled %}checked{% endif %} style="width:auto;">
+                    {{ t('integrations_enabled') }}
+                </label>
+                <br>
+                <div style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+                    <button type="submit">{{ t('integrations_save') }}</button>
+                    <button type="submit" name="action" value="delete_integration"
+                            onclick="return confirm('Delete this integration?')"
+                            style="background:var(--error);">{{ t('integrations_delete') }}</button>
+                </div>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="color:var(--muted);">{{ t('integrations_no_items') }}</p>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('integrations_view') }}?tab=api_poll">
+        <input type="hidden" name="action" value="add_api_poll">
+        <div class="card">
+            <h3>{{ t('integrations_add') }}: API Polling</h3>
+            <div class="grid-2">
+                <div>
+                    <label>{{ t('api_poll_name') }}</label>
+                    <input type="text" name="name" required placeholder="e.g. Priority Orders API">
+                    <label>{{ t('api_poll_url') }}</label>
+                    <input type="text" name="url" required placeholder="https://api.example.com/orders">
+                    <label>{{ t('api_poll_interval') }}</label>
+                    <input type="number" name="poll_interval_seconds" min="30" value="300">
+                </div>
+                <div>
+                    <label>{{ t('transform_output_dir') }}</label>
+                    <input type="text" name="output_dir" placeholder="C:\Motorad\api_poll\output">
+                    <label>{{ t('transform_output_format') }}</label>
+                    <select name="output_format">
+                        <option value="json">JSON</option>
+                        <option value="xml">XML</option>
+                        <option value="csv">CSV</option>
+                    </select>
+                </div>
+            </div>
+            <button type="submit" style="margin-top:0.6rem;">{{ t('integrations_add') }}</button>
+        </div>
+    </form>
+
+{# ================================================================ #}
+{# API DESTINATIONS TAB (overview — shown on integrations that use   #}
+{# an api destination instead of file destination)                   #}
+{# ================================================================ #}
+{% elif active_tab == 'api_dest' %}
+
+    {% if api_dest_integrations %}
+        {% for integ in api_dest_integrations %}
+        <div class="card" style="margin-bottom:1.2rem;">
+            <h2>{{ integ.name or integ.id }}
+                <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:3px;
+                    background:{% if integ.enabled %}var(--success){% else %}var(--muted){% endif %};
+                    color:#fff; margin-inline-start:0.5rem;">
+                    {% if integ.enabled %}{{ t('integrations_enabled') }}{% else %}{{ t('integrations_disabled') }}{% endif %}
+                </span>
+            </h2>
+            <form method="post" action="{{ url_for('integrations_view') }}?tab=api_dest">
+                <input type="hidden" name="action" value="update_api_dest">
+                <input type="hidden" name="integration_id" value="{{ integ.id }}">
+                <div class="grid-2">
+                    <div>
+                        <label>{{ t('api_dest_name') }}</label>
+                        <input type="text" name="name" value="{{ integ.name }}">
+                        <label>{{ t('api_dest_url') }}</label>
+                        <input type="text" name="dest_url" value="{{ integ.destination.config.get('url', '') }}">
+                        <label>{{ t('api_dest_method') }}</label>
+                        <select name="dest_method">
+                            {% for m in ['POST', 'PUT', 'PATCH'] %}
+                            <option value="{{ m }}" {% if integ.destination.config.get('method') == m %}selected{% endif %}>{{ m }}</option>
+                            {% endfor %}
+                        </select>
+                        <label>{{ t('api_dest_content_type') }}</label>
+                        <select name="dest_content_type">
+                            {% for ct in ['application/json', 'application/xml', 'text/xml'] %}
+                            <option value="{{ ct }}" {% if integ.destination.config.get('content_type') == ct %}selected{% endif %}>{{ ct }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label>{{ t('api_dest_auth_type') }}</label>
+                        <select name="dest_auth_type">
+                            <option value="none" {% if integ.destination.config.get('auth', {}).get('type') == 'none' %}selected{% endif %}>{{ t('api_poll_auth_none') }}</option>
+                            <option value="bearer" {% if integ.destination.config.get('auth', {}).get('type') == 'bearer' %}selected{% endif %}>{{ t('api_poll_auth_bearer') }}</option>
+                            <option value="basic" {% if integ.destination.config.get('auth', {}).get('type') == 'basic' %}selected{% endif %}>{{ t('api_poll_auth_basic') }}</option>
+                            <option value="api_key" {% if integ.destination.config.get('auth', {}).get('type') == 'api_key' %}selected{% endif %}>{{ t('api_poll_auth_api_key') }}</option>
+                        </select>
+                        <label>{{ t('api_dest_timeout') }}</label>
+                        <input type="number" name="dest_timeout" min="5"
+                               value="{{ integ.destination.config.get('timeout_seconds', 30) }}">
+                        <label>{{ t('api_dest_retries') }}</label>
+                        <input type="number" name="dest_retries" min="0" max="10"
+                               value="{{ integ.destination.config.get('retry_count', 2) }}">
+                        <label>{{ t('api_dest_retry_delay') }}</label>
+                        <input type="number" name="dest_retry_delay" min="1"
+                               value="{{ integ.destination.config.get('retry_delay_seconds', 5) }}">
+                    </div>
+                </div>
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-top:0.8rem;">
+                    <input type="checkbox" name="enabled"
+                           {% if integ.enabled %}checked{% endif %} style="width:auto;">
+                    {{ t('integrations_enabled') }}
+                </label>
+                <br>
+                <div style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+                    <button type="submit">{{ t('integrations_save') }}</button>
+                    <button type="submit" name="action" value="delete_integration"
+                            onclick="return confirm('Delete this integration?')"
+                            style="background:var(--error);">{{ t('integrations_delete') }}</button>
+                </div>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="color:var(--muted);">{{ t('integrations_no_items') }}</p>
+    {% endif %}
+
+{% endif %}
+
+{% endblock %}
